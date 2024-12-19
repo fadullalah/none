@@ -11,9 +11,13 @@
   "license": "ISC",
   "description": "",
   "dependencies": {
+    "@ffmpeg/core": "^0.12.6",
+    "@ffmpeg/ffmpeg": "^0.12.10",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
+    "fluent-ffmpeg": "^2.1.3",
+    "node-fetch": "^3.3.2",
     "puppeteer": "^23.11.0",
     "puppeteer-core": "^23.11.0",
     "puppeteer-extra": "^3.3.6",

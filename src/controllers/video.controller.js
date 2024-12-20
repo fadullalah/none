@@ -4,145 +4,281 @@ import { browserOptions, customNavigate } from '../utils/browser.js';
 import { convertToDirectUrl } from '../utils/url-converter.js';
 
 const videoStore = new Map();
+let browserInstance = null;
 
-async function getVideoUrl(page, embedUrl) {
-  const videoUrls = new Set();
-  
+function getTimeDiff(startTime) {
+  return `${(performance.now() - startTime).toFixed(2)}ms`;
+}
+
+// Browser management with error handling
+async function getBrowser() {
   try {
-    await page.setRequestInterception(true);
-
-    page.on('request', request => {
-      const resourceType = request.resourceType();
-      if (['image', 'stylesheet', 'font', 'download'].includes(resourceType)) {
-        request.abort();
-        return;
-      }
-      
-      const url = request.url();
-      if (resourceType === 'media' || url.includes('.m3u8') || url.includes('.mp4')) {
-        videoUrls.add(url);
-        if (videoUrls.size >= 2) {
-          request.abort();
-          return;
-        }
-      }
-      request.continue();
-    });
-
-    await page.setExtraHTTPHeaders({
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-      'Accept-Language': 'en-US,en;q=0.5',
-      'Referer': new URL(embedUrl).origin
-    });
-
-    await page.evaluateOnNewDocument(() => {
-      Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-      window.chrome = { runtime: {} };
-    });
-
-    await customNavigate(page, embedUrl);
-    
-    const selectors = ['#player', '.play-button', 'video'];
-    for (const selector of selectors) {
-      try {
-        const element = await page.$(selector);
-        if (element) {
-          await element.click();
-          break;
-        }
-      } catch (e) {
-        continue;
-      }
+    if (!browserInstance || !browserInstance.isConnected()) {
+      console.log('[Browser] Creating new browser instance');
+      browserInstance = await puppeteer.launch({
+        ...browserOptions,
+        args: [
+          ...browserOptions.args,
+          '--no-zygote',
+          '--disable-dev-shm-usage'
+        ]
+      });
     }
-
-    if (videoUrls.size > 0) {
-      return Array.from(videoUrls).map(url => convertToDirectUrl(url));
-    }
-    
-    // Short wait for additional quality options
-    await page.waitForResponse(
-      response => {
-        const url = response.url();
-        const isVideo = url.includes('.m3u8') || url.includes('.mp4');
-        if (isVideo) videoUrls.add(url);
-        return isVideo && videoUrls.size >= 2;
-      },
-      { timeout: 5000 }
-    ).catch(() => {});
-
-    return Array.from(videoUrls).map(url => convertToDirectUrl(url));
-    
+    return browserInstance;
   } catch (error) {
-    console.error('Error fetching video URL:', error);
-    return Array.from(videoUrls).map(url => convertToDirectUrl(url));
+    console.error('[Browser] Launch error:', error);
+    browserInstance = null;
+    throw error;
   }
 }
 
-// Rest of the controller code remains the same
+async function processApiResponse(data) {
+  const startTime = performance.now();
+  const results = [];
+  
+  if (data.stream && data.stream.playlist) {
+    const videoUrl = data.stream.playlist;
+    const subtitles = (data.stream.captions || []).map(caption => ({
+      label: caption.language,
+      file: caption.url
+    }));
+
+    results.push({
+      video_urls: [videoUrl],
+      subtitles: subtitles,
+      qualities: {
+        '1080': `${videoUrl.split('playlist.m3u8')[0]}1080/index.m3u8`,
+        '720': `${videoUrl.split('playlist.m3u8')[0]}720/index.m3u8`,
+        '480': `${videoUrl.split('playlist.m3u8')[0]}480/index.m3u8`,
+        '360': `${videoUrl.split('playlist.m3u8')[0]}360/index.m3u8`
+      }
+    });
+  } else if (data.source) {
+    if (Array.isArray(data.source)) {
+      data.source.forEach(src => {
+        if (src.file) results.push({
+          video_urls: [convertToDirectUrl(src.file)],
+          subtitles: data.track || []
+        });
+      });
+    } else if (data.source.file) {
+      results.push({
+        video_urls: [convertToDirectUrl(data.source.file)],
+        subtitles: data.track || []
+      });
+    }
+  }
+
+  console.log(`[Time] Response processing took: ${getTimeDiff(startTime)}`);
+  return results;
+}
+
+async function getVideoUrl(page, embedUrl) {
+  const startTime = performance.now();
+  console.log('\n[Browser] Starting request tracking for:', embedUrl);
+  
+  let apiResponseData = null;
+  let responseUrl = null;
+  let apiResponseTime = null;
+
+  try {
+    // Set up request interception
+    await page.setRequestInterception(true);
+
+    const responsePromise = new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        reject(new Error('API response timeout'));
+      }, 8000); // Increased timeout
+
+      page.on('request', request => {
+        const resourceType = request.resourceType();
+        if (['image', 'stylesheet', 'font', 'media'].includes(resourceType)) {
+          request.abort();
+          return;
+        }
+        
+        const url = request.url();
+        if (url.includes('/api/b/movie') || url.includes('/api/b/tv')) {
+          console.log('[Browser] Detected API request:', url);
+        }
+        request.continue();
+      });
+
+      page.on('response', async response => {
+        const url = response.url();
+        if (url.includes('/api/b/movie') || url.includes('/api/b/tv')) {
+          try {
+            const responseStartTime = performance.now();
+            responseUrl = url;
+            const data = await response.json();
+            apiResponseTime = getTimeDiff(responseStartTime);
+            console.log(`[Browser] API response captured in: ${apiResponseTime}`);
+            apiResponseData = data;
+            clearTimeout(timeout);
+            resolve(data);
+          } catch (e) {
+            console.log('[Browser] Failed to parse API response:', e.message);
+          }
+        }
+      });
+    });
+
+    // Navigate to page with shorter timeout
+    console.log('[Browser] Navigating to page');
+    const navigationStartTime = performance.now();
+    
+    await Promise.race([
+      page.goto(embedUrl, {
+        waitUntil: 'domcontentloaded',
+        timeout: 10000
+      }),
+      responsePromise
+    ]);
+
+    console.log(`[Time] Navigation took: ${getTimeDiff(navigationStartTime)}`);
+
+    // Wait for the API response
+    const data = await responsePromise;
+    
+    // Process response
+    const results = await processApiResponse(data);
+    
+    if (results.length > 0) {
+      console.log(`[Time] Total processing time: ${getTimeDiff(startTime)}`);
+      return { 
+        results,
+        apiUrl: responseUrl,
+        timing: {
+          total: getTimeDiff(startTime),
+          apiResponse: apiResponseTime
+        }
+      };
+    }
+    
+    throw new Error('No valid video sources found');
+
+  } catch (error) {
+    console.error('[Browser] Error:', error.message);
+    throw error;
+  }
+}
+
 export const videoController = {
   async getVideoUrlFromEmbed(req, res) {
+    const totalStartTime = performance.now();
     const { embedUrl } = req.query;
     if (!embedUrl) return res.status(400).json({ error: 'Embed URL required' });
 
-    let browser;
+    let page = null;
     try {
-      browser = await puppeteer.launch(browserOptions);
-      const page = await browser.newPage();
-      const videoUrls = await getVideoUrl(page, embedUrl);
+      const browserStartTime = performance.now();
+      const browser = await getBrowser();
+      console.log(`[Time] Browser get/launch took: ${getTimeDiff(browserStartTime)}`);
 
-      if (videoUrls.length > 0) {
+      page = await browser.newPage();
+      const data = await getVideoUrl(page, embedUrl);
+
+      if (data.results?.length > 0) {
         const uniqueId = uuidv4();
-        videoStore.set(uniqueId, videoUrls[0]);
+        videoStore.set(uniqueId, data.results[0].video_urls[0]);
+        console.log(`[Time] Total request time: ${getTimeDiff(totalStartTime)}`);
         res.json({ 
-          videoUrls, 
-          watchUrl: `${process.env.BASE_URL}/watch/${uniqueId}`
+          ...data,
+          watchUrl: `${process.env.BASE_URL}/watch/${uniqueId}`,
+          timing: {
+            ...data.timing,
+            total: getTimeDiff(totalStartTime)
+          }
         });
       } else {
-        res.status(404).json({ error: 'No video URL found' });
+        res.status(404).json({ error: 'No video data found' });
       }
     } catch (error) {
-      res.status(500).json({ error: 'Failed to fetch video URL', details: error.message });
+      res.status(500).json({ 
+        error: 'Failed to fetch video data', 
+        details: error.message,
+        timing: { totalTime: getTimeDiff(totalStartTime) }
+      });
     } finally {
-      if (browser) await browser.close();
+      if (page) {
+        try {
+          await page.close();
+        } catch (e) {
+          console.error('[Browser] Error closing page:', e.message);
+        }
+      }
     }
   },
 
   async getTVEpisode(req, res) {
+    const totalStartTime = performance.now();
     const { id, season, episode } = req.params;
-    let browser;
+    let page = null;
+    
     try {
-      browser = await puppeteer.launch(browserOptions);
-      const page = await browser.newPage();
-      const videoUrls = await getVideoUrl(page, `https://vidlink.pro/tv/${id}/${season}/${episode}`);
+      const browser = await getBrowser();
+      page = await browser.newPage();
+      const data = await getVideoUrl(page, `https://vidlink.pro/tv/${id}/${season}/${episode}`);
       
+      console.log(`[Time] Total request time: ${getTimeDiff(totalStartTime)}`);
       res.json({ 
         status: 'success',
-        results: videoUrls.map(url => ({ video_urls: [url] }))
+        ...data,
+        timing: {
+          ...data.timing,
+          total: getTimeDiff(totalStartTime)
+        }
       });
     } catch (error) {
-      res.status(500).json({ status: 'error', message: error.message });
+      res.status(500).json({ 
+        status: 'error', 
+        message: error.message,
+        timing: { totalTime: getTimeDiff(totalStartTime) }
+      });
     } finally {
-      if (browser) await browser.close();
+      if (page) {
+        try {
+          await page.close();
+        } catch (e) {
+          console.error('[Browser] Error closing page:', e.message);
+        }
+      }
     }
   },
 
   async getMovie(req, res) {
+    const totalStartTime = performance.now();
     const { id } = req.params;
-    let browser;
+    let page = null;
+    
     try {
-      browser = await puppeteer.launch(browserOptions);
-      const page = await browser.newPage();
-      const videoUrls = await getVideoUrl(page, `https://vidlink.pro/movie/${id}`);
+      const browser = await getBrowser();
+      page = await browser.newPage();
+      const data = await getVideoUrl(page, `https://vidlink.pro/movie/${id}`);
       
+      console.log(`[Time] Total request time: ${getTimeDiff(totalStartTime)}`);
       res.json({ 
         status: 'success',
-        results: videoUrls.map(url => ({ video_urls: [url] }))
+        ...data,
+        timing: {
+          ...data.timing,
+          total: getTimeDiff(totalStartTime)
+        }
       });
     } catch (error) {
-      res.status(500).json({ status: 'error', message: error.message });
+      res.status(500).json({ 
+        status: 'error', 
+        message: error.message,
+        timing: { totalTime: getTimeDiff(totalStartTime) }
+      });
     } finally {
-      if (browser) await browser.close();
+      if (page) {
+        try {
+          await page.close();
+        } catch (e) {
+          console.error('[Browser] Error closing page:', e.message);
+        }
+      }
     }
   }
 };

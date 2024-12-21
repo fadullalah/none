@@ -88,7 +88,7 @@ async function getVideoUrl(page, embedUrl) {
     const responsePromise = new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
         reject(new Error('API response timeout'));
-      }, 8000); // Increased timeout
+      }, 20000); // Increased timeout
 
       page.on('request', request => {
         const resourceType = request.resourceType();

@@ -3,317 +3,156 @@ import NodeCache from 'node-cache';
 import fs from 'fs/promises';
 import path from 'path';
 
-// Cache configuration
-const cache = new NodeCache({
- stdTTL: 12 * 60 * 60, // 12 hours TTL
- checkperiod: 60 * 60, // Check every hour
- useClones: false
-});
-
+const cache = new NodeCache({ stdTTL: 12 * 60 * 60, checkperiod: 60 * 60 });
 const TMDB_API_KEY = 'd3383b7991d02ed3b3842be70307705b';
 const CACHE_FILE = path.join(process.cwd(), 'cache', 'quality-cache.json');
-const UPDATE_INTERVAL = 12 * 60 * 60 * 1000; // 12 hours in milliseconds
+const TIMEOUT = 5000;
 
-let pendingSaves = new Set(); // Track new entries waiting to be saved
-let saveCacheTimeout = null; // Timer for batched saves
+const initCache = async () => {
+  try {
+    await fs.mkdir(path.dirname(CACHE_FILE), { recursive: true });
+    const data = await fs.readFile(CACHE_FILE, 'utf8');
+    const savedCache = JSON.parse(data);
+    Object.entries(savedCache).forEach(([key, value]) => {
+      cache.set(key, { ...value.data, lastChecked: Date.now() });
+    });
+  } catch (error) {
+    console.log('Starting fresh cache');
+  }
+};
 
-// Load cache from disk
-async function loadCacheFromDisk() {
- try {
-   await fs.mkdir(path.join(process.cwd(), 'cache'), { recursive: true });
-   const data = await fs.readFile(CACHE_FILE, 'utf8');
-   const savedCache = JSON.parse(data);
-   
-   for (const [key, value] of Object.entries(savedCache)) {
-     cache.set(key, {
-       ...value.data,
-       lastChecked: value.lastChecked || Date.now(),
-       lastUpdated: value.lastUpdated || Date.now()
-     });
-   }
-   console.log(`Quality cache loaded with ${Object.keys(savedCache).length} entries`);
- } catch (error) {
-   console.log('Starting with fresh quality cache');
- }
-}
+const saveCache = async () => {
+  try {
+    const cacheData = {};
+    cache.keys().forEach(key => {
+      const data = cache.get(key);
+      cacheData[key] = { data, lastChecked: data.lastChecked };
+    });
+    await fs.writeFile(CACHE_FILE, JSON.stringify(cacheData));
+  } catch (error) {
+    console.error('Cache save error:', error);
+  }
+};
 
-// Batch save to disk
-async function batchSaveToDisk() {
- if (pendingSaves.size === 0) return;
- 
- try {
-   const cacheData = {};
-   const keys = cache.keys();
-   
-   keys.forEach(key => {
-     const data = cache.get(key);
-     cacheData[key] = {
-       data,
-       lastChecked: data.lastChecked,
-       lastUpdated: data.lastUpdated
-     };
-   });
-   
-   await fs.writeFile(CACHE_FILE, JSON.stringify(cacheData, null, 2));
-   console.log(`Batch saved ${pendingSaves.size} new entries. Total cache size: ${keys.length}`);
-   pendingSaves.clear();
- } catch (error) {
-   console.error('Error batch saving cache:', error);
- }
-}
-
-// Debounced save function
-function debouncedSave() {
- if (saveCacheTimeout) {
-   clearTimeout(saveCacheTimeout);
- }
- saveCacheTimeout = setTimeout(batchSaveToDisk, 5000); // Wait 5 seconds to batch saves
-}
-
-// Update cached qualities
-async function updateCachedQualities() {
- console.log('Starting cache update check...');
- const now = Date.now();
- const keys = cache.keys();
- let updatedCount = 0;
- let needsSave = false;
-
- for (const key of keys) {
-   const cachedData = cache.get(key);
-   
-   if (now - cachedData.lastChecked >= UPDATE_INTERVAL) {
-     try {
-       const [type, id] = key.split('-');
-       let newData;
-
-       if (type === 'imdb') {
-         newData = await fetchQualityInfo(id);
-       } else if (type === 'tmdb') {
-         const imdbId = await convertTmdbToImdb(id);
-         newData = await fetchQualityInfo(imdbId);
-       }
-
-       if (!newData.error && JSON.stringify(newData) !== JSON.stringify(cachedData)) {
-         cache.set(key, {
-           ...newData,
-           lastChecked: now,
-           lastUpdated: now
-         });
-         updatedCount++;
-         needsSave = true;
-         console.log(`Updated: ${key}`);
-       } else {
-         cache.set(key, {
-           ...cachedData,
-           lastChecked: now
-         });
-       }
-     } catch (error) {
-       console.error(`Update failed for ${key}:`, error);
-     }
-   }
- }
-
- console.log(`Update completed. Updated ${updatedCount} entries`);
- if (needsSave) {
-   await batchSaveToDisk();
- }
-}
-
-// Initialize periodic tasks
-setInterval(updateCachedQualities, UPDATE_INTERVAL);
-
-// Handle shutdown
 process.on('SIGINT', async () => {
- console.log('Saving cache before shutdown...');
- await batchSaveToDisk();
- process.exit();
+  await saveCache();
+  process.exit();
 });
 
-// Load initial cache
-loadCacheFromDisk();
+const fetchWithTimeout = async (url) => {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), TIMEOUT);
+  try {
+    const response = await fetch(url, { signal: controller.signal });
+    clearTimeout(timeout);
+    if (!response.ok) throw new Error(`API error: ${response.status}`);
+    return await response.json();
+  } catch (error) {
+    if (error.name === 'AbortError') throw new Error('Request timeout');
+    throw error;
+  }
+};
 
-async function convertTmdbToImdb(tmdbId) {
- const url = `https://api.themoviedb.org/3/movie/${tmdbId}?api_key=${TMDB_API_KEY}&append_to_response=external_ids`;
- 
- try {
-   const controller = new AbortController();
-   const timeout = setTimeout(() => controller.abort(), 5000);
+const convertTmdbToImdb = async (tmdbId) => {
+  const data = await fetchWithTimeout(
+    `https://api.themoviedb.org/3/movie/${tmdbId}?api_key=${TMDB_API_KEY}&append_to_response=external_ids`
+  );
+  const imdbId = data.external_ids?.imdb_id;
+  if (!imdbId) throw new Error('IMDb ID not found');
+  return imdbId;
+};
 
-   const response = await fetch(url, { signal: controller.signal });
-   clearTimeout(timeout);
+const extractQualityType = (name) => {
+  const str = name.toUpperCase();
+  if (str.includes('2160P') || str.includes('4K') || str.includes('UHD')) return '4K';
+  if (str.includes('1080P') || str.includes('FULLHD')) return '1080p';
+  if (str.includes('720P') || str.includes('HD')) return '720p';
+  if (str.includes('480P') || str.includes('SD')) return '480p';
+  if (str.includes('CAM') || str.includes('TS')) return 'CAM';
+  if (str.includes('BLURAY') || str.includes('BLU-RAY')) return 'BluRay';
+  if (str.includes('WEBDL') || str.includes('WEB-DL') || str.includes('WEB')) return 'WebDL';
+  if (str.includes('DVDRIP') || str.includes('DVD')) return 'DVD';
+  if (str.includes('HDTV')) return 'HDTV';
+  if (str.includes('PDTV')) return 'PDTV';
+  return 'Other';
+};
 
-   if (!response.ok) {
-     throw new Error(`TMDb API error: ${response.status}`);
-   }
-   
-   const data = await response.json();
-   const imdbId = data.external_ids?.imdb_id;
-   
-   if (!imdbId) {
-     throw new Error('IMDb ID not found');
-   }
-   
-   return imdbId;
- } catch (error) {
-   if (error.name === 'AbortError') {
-     throw new Error('TMDb API timeout');
-   }
-   throw error;
- }
-}
+const determineBestQuality = (qualities) => {
+  const order = ['4K', '1080p', '720p', '480p', 'BluRay', 'WebDL', 'HDTV', 'DVD', 'PDTV', 'CAM', 'Other'];
+  return order.find(q => qualities.includes(q)) || qualities[0] || null;
+};
 
-async function fetchQualityInfo(imdbId) {
- const url = `https://torrentio.strem.fun/stream/movie/${imdbId}.json`;
- 
- try {
-   const controller = new AbortController();
-   const timeout = setTimeout(() => controller.abort(), 5000);
+const fetchQualityInfo = async (imdbId) => {
+  try {
+    const data = await fetchWithTimeout(`https://torrentio.strem.fun/stream/movie/${imdbId}.json`);
+    if (!data.streams?.length) {
+      return { qualities: [], mostCommon: null, bestQuality: null, allQualities: [] };
+    }
 
-   const response = await fetch(url, { signal: controller.signal });
-   clearTimeout(timeout);
+    const qualityCounts = new Map();
+    const allQualities = [];
+    
+    data.streams.forEach(stream => {
+      const quality = extractQualityType(stream.name);
+      qualityCounts.set(quality, (qualityCounts.get(quality) || 0) + 1);
+      allQualities.push({ quality, name: stream.name });
+    });
 
-   if (!response.ok) {
-     throw new Error(`Torrentio API error: ${response.status}`);
-   }
+    const qualities = Array.from(qualityCounts.entries())
+      .sort(([,a], [,b]) => b - a)
+      .map(([quality]) => quality);
 
-   const data = await response.json();
-   if (!data.streams) {
-     return { qualities: [], mostCommon: null, bestQuality: null, allQualities: [] };
-   }
-
-   const qualityCounts = {};
-   const allQualities = [];
-   
-   data.streams.forEach(stream => {
-     const quality = extractQualityType(stream.name);
-     qualityCounts[quality] = (qualityCounts[quality] || 0) + 1;
-     allQualities.push({ quality, name: stream.name });
-   });
-
-   const qualities = Object.keys(qualityCounts)
-     .sort((a, b) => qualityCounts[b] - qualityCounts[a]);
-     
-   const mostCommon = qualities[0];
-   const bestQuality = determineBestQuality(qualities);
-
-   return { qualities, mostCommon, bestQuality, allQualities };
- } catch (error) {
-   if (error.name === 'AbortError') {
-     return { error: 'Request timeout' };
-   }
-   return { error: error.message };
- }
-}
-
-function extractQualityType(qualityString) {
- const upperCaseString = qualityString.toUpperCase();
-
- if (upperCaseString.includes('2160P') || upperCaseString.includes('4K') || upperCaseString.includes('UHD')) {
-   return '4K';
- } else if (upperCaseString.includes('1080P') || upperCaseString.includes('FULLHD')) {
-   return '1080p';
- } else if (upperCaseString.includes('720P') || upperCaseString.includes('HD')) {
-   return '720p';
- } else if (upperCaseString.includes('480P') || upperCaseString.includes('SD')) {
-   return '480p';
- } else if (upperCaseString.includes('CAM') || upperCaseString.includes('TS') || upperCaseString.includes('TELESYNC')) {
-   return 'CAM';
- } else if (upperCaseString.includes('BLURAY') || upperCaseString.includes('BLU-RAY') || upperCaseString.includes('BRRIP')) {
-   return 'BluRay';
- } else if (upperCaseString.includes('WEBDL') || upperCaseString.includes('WEB-DL') || upperCaseString.includes('WEB')) {
-   return 'WebDL';
- } else if (upperCaseString.includes('DVDRIP') || upperCaseString.includes('DVD')) {
-   return 'DVD';
- } else if (upperCaseString.includes('HDTV')) {
-   return 'HDTV';
- } else if (upperCaseString.includes('PDTV')) {
-   return 'PDTV';
- } else {
-   return 'Other';
- }
-}
-
-function determineBestQuality(qualities) {
- const qualityOrder = ['4K', '1080p', '720p', '480p', 'BluRay', 'WebDL', 'HDTV', 'DVD', 'PDTV', 'CAM', 'Other'];
- for (let quality of qualityOrder) {
-   if (qualities.includes(quality)) {
-     return quality;
-   }
- }
- return qualities[0] || null;
-}
+    return {
+      qualities,
+      mostCommon: qualities[0],
+      bestQuality: determineBestQuality(qualities),
+      allQualities
+    };
+  } catch (error) {
+    return { error: error.message };
+  }
+};
 
 export const qualityController = {
- async getQualityInfo(req, res) {
-   const { imdb_ids, tmdb_ids } = req.query;
+  async getQualityInfo(req, res) {
+    const { imdb_ids, tmdb_ids } = req.query;
+    if (!imdb_ids && !tmdb_ids) {
+      return res.status(400).json({ error: 'Missing IDs' });
+    }
 
-   if (!imdb_ids && !tmdb_ids) {
-     return res.status(400).json({ error: 'Missing imdb_ids or tmdb_ids parameter' });
-   }
+    try {
+      const results = {};
+      const processId = async (id, type) => {
+        const cacheKey = `${type}-${id}`;
+        let data = cache.get(cacheKey);
+        
+        if (!data) {
+          data = type === 'imdb' 
+            ? await fetchQualityInfo(id)
+            : await fetchQualityInfo(await convertTmdbToImdb(id));
+          
+          if (!data.error) {
+            cache.set(cacheKey, { ...data, lastChecked: Date.now() });
+          }
+        }
+        return data;
+      };
 
-   try {
-     const results = {};
-     let newEntries = false;
-     
-     if (imdb_ids) {
-       const ids = imdb_ids.split(',');
-       for (const id of ids) {
-         const cacheKey = `imdb-${id}`;
-         let data = cache.get(cacheKey);
-         
-         if (!data) {
-           data = await fetchQualityInfo(id);
-           if (!data.error) {
-             cache.set(cacheKey, {
-               ...data,
-               lastChecked: Date.now(),
-               lastUpdated: Date.now()
-             });
-             pendingSaves.add(cacheKey);
-             newEntries = true;
-           }
-         }
-         results[id] = data;
-       }
-     }
-     
-     if (tmdb_ids) {
-       const ids = tmdb_ids.split(',');
-       for (const id of ids) {
-         const cacheKey = `tmdb-${id}`;
-         let data = cache.get(cacheKey);
-         
-         if (!data) {
-           try {
-             const imdbId = await convertTmdbToImdb(id);
-             data = await fetchQualityInfo(imdbId);
-             if (!data.error) {
-               cache.set(cacheKey, {
-                 ...data,
-                 lastChecked: Date.now(),
-                 lastUpdated: Date.now()
-               });
-               pendingSaves.add(cacheKey);
-               newEntries = true;
-             }
-           } catch (error) {
-             console.error(`Error processing TMDB ID ${id}:`, error);
-             data = { error: error.message };
-           }
-         }
-         results[id] = data;
-       }
-     }
+      await Promise.all([
+        ...(imdb_ids?.split(',').map(id => processId(id, 'imdb')) || []),
+        ...(tmdb_ids?.split(',').map(id => processId(id, 'tmdb')) || [])
+      ]).then(responses => {
+        const ids = [...(imdb_ids?.split(',') || []), ...(tmdb_ids?.split(',') || [])];
+        ids.forEach((id, index) => {
+          results[id] = responses[index];
+        });
+      });
 
-     if (newEntries) {
-       debouncedSave();
-     }
-
-     res.json(results);
-   } catch (error) {
-     console.error('Global error:', error);
-     res.status(500).json({ error: error.message });
-   }
- }
+      res.json(results);
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+  }
 };
+
+initCache();

@@ -1,158 +1,218 @@
-import fetch from 'node-fetch';
 import NodeCache from 'node-cache';
-import fs from 'fs/promises';
-import path from 'path';
+import _ from 'lodash';
+import fetch from 'node-fetch';
 
-const cache = new NodeCache({ stdTTL: 12 * 60 * 60, checkperiod: 60 * 60 });
+// Initialize cache with 24 hour TTL
+const cache = new NodeCache({ stdTTL: 24 * 60 * 60 });
+
 const TMDB_API_KEY = 'd3383b7991d02ed3b3842be70307705b';
-const CACHE_FILE = path.join(process.cwd(), 'cache', 'quality-cache.json');
-const TIMEOUT = 5000;
 
-const initCache = async () => {
-  try {
-    await fs.mkdir(path.dirname(CACHE_FILE), { recursive: true });
-    const data = await fs.readFile(CACHE_FILE, 'utf8');
-    const savedCache = JSON.parse(data);
-    Object.entries(savedCache).forEach(([key, value]) => {
-      cache.set(key, { ...value.data, lastChecked: Date.now() });
-    });
-  } catch (error) {
-    console.log('Starting fresh cache');
-  }
-};
+// Define workers
+const WORKERS = [
+    'https://q-s.nunflix-info.workers.dev',
+    'https://q1.xaxipe5682.workers.dev',
+    'https://q-s2.sofefor785.workers.dev',
+    'https://q-s3.hivili6726.workers.dev'
+];
 
-const saveCache = async () => {
-  try {
-    const cacheData = {};
-    cache.keys().forEach(key => {
-      const data = cache.get(key);
-      cacheData[key] = { data, lastChecked: data.lastChecked };
-    });
-    await fs.writeFile(CACHE_FILE, JSON.stringify(cacheData));
-  } catch (error) {
-    console.error('Cache save error:', error);
-  }
-};
+const workerHealth = new Map(WORKERS.map(worker => [worker, { 
+    isHealthy: true,
+    failCount: 0,
+    lastCheck: Date.now() 
+}]));
 
-process.on('SIGINT', async () => {
-  await saveCache();
-  process.exit();
-});
+let currentWorkerIndex = 0;
 
-const fetchWithTimeout = async (url) => {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), TIMEOUT);
-  try {
-    const response = await fetch(url, { signal: controller.signal });
-    clearTimeout(timeout);
-    if (!response.ok) throw new Error(`API error: ${response.status}`);
-    return await response.json();
-  } catch (error) {
-    if (error.name === 'AbortError') throw new Error('Request timeout');
-    throw error;
-  }
-};
-
-const convertTmdbToImdb = async (tmdbId) => {
-  const data = await fetchWithTimeout(
-    `https://api.themoviedb.org/3/movie/${tmdbId}?api_key=${TMDB_API_KEY}&append_to_response=external_ids`
-  );
-  const imdbId = data.external_ids?.imdb_id;
-  if (!imdbId) throw new Error('IMDb ID not found');
-  return imdbId;
-};
-
-const extractQualityType = (name) => {
-  const str = name.toUpperCase();
-  if (str.includes('2160P') || str.includes('4K') || str.includes('UHD')) return '4K';
-  if (str.includes('1080P') || str.includes('FULLHD')) return '1080p';
-  if (str.includes('720P') || str.includes('HD')) return '720p';
-  if (str.includes('480P') || str.includes('SD')) return '480p';
-  if (str.includes('CAM') || str.includes('TS')) return 'CAM';
-  if (str.includes('BLURAY') || str.includes('BLU-RAY')) return 'BluRay';
-  if (str.includes('WEBDL') || str.includes('WEB-DL') || str.includes('WEB')) return 'WebDL';
-  if (str.includes('DVDRIP') || str.includes('DVD')) return 'DVD';
-  if (str.includes('HDTV')) return 'HDTV';
-  if (str.includes('PDTV')) return 'PDTV';
-  return 'Other';
-};
-
-const determineBestQuality = (qualities) => {
-  const order = ['4K', '1080p', '720p', '480p', 'BluRay', 'WebDL', 'HDTV', 'DVD', 'PDTV', 'CAM', 'Other'];
-  return order.find(q => qualities.includes(q)) || qualities[0] || null;
-};
-
-const fetchQualityInfo = async (imdbId) => {
-  try {
-    const data = await fetchWithTimeout(`https://torrentio.strem.fun/stream/movie/${imdbId}.json`);
-    if (!data.streams?.length) {
-      return { qualities: [], mostCommon: null, bestQuality: null, allQualities: [] };
-    }
-
-    const qualityCounts = new Map();
-    const allQualities = [];
-    
-    data.streams.forEach(stream => {
-      const quality = extractQualityType(stream.name);
-      qualityCounts.set(quality, (qualityCounts.get(quality) || 0) + 1);
-      allQualities.push({ quality, name: stream.name });
-    });
-
-    const qualities = Array.from(qualityCounts.entries())
-      .sort(([,a], [,b]) => b - a)
-      .map(([quality]) => quality);
-
-    return {
-      qualities,
-      mostCommon: qualities[0],
-      bestQuality: determineBestQuality(qualities),
-      allQualities
-    };
-  } catch (error) {
-    return { error: error.message };
-  }
-};
-
-export const qualityController = {
-  async getQualityInfo(req, res) {
-    const { imdb_ids, tmdb_ids } = req.query;
-    if (!imdb_ids && !tmdb_ids) {
-      return res.status(400).json({ error: 'Missing IDs' });
-    }
+// Convert TMDB ID to IMDB ID
+async function convertTmdbToImdb(tmdbId) {
+    const cacheKey = `tmdb-convert-${tmdbId}`;
+    const cached = cache.get(cacheKey);
+    if (cached) return cached;
 
     try {
-      const results = {};
-      const processId = async (id, type) => {
-        const cacheKey = `${type}-${id}`;
-        let data = cache.get(cacheKey);
-        
-        if (!data) {
-          data = type === 'imdb' 
-            ? await fetchQualityInfo(id)
-            : await fetchQualityInfo(await convertTmdbToImdb(id));
-          
-          if (!data.error) {
-            cache.set(cacheKey, { ...data, lastChecked: Date.now() });
-          }
+        const response = await fetch(
+            `https://api.themoviedb.org/3/movie/${tmdbId}?api_key=${TMDB_API_KEY}&append_to_response=external_ids`
+        );
+
+        if (!response.ok) {
+            throw new Error(`TMDB API error: ${response.status}`);
         }
-        return data;
-      };
 
-      await Promise.all([
-        ...(imdb_ids?.split(',').map(id => processId(id, 'imdb')) || []),
-        ...(tmdb_ids?.split(',').map(id => processId(id, 'tmdb')) || [])
-      ]).then(responses => {
-        const ids = [...(imdb_ids?.split(',') || []), ...(tmdb_ids?.split(',') || [])];
-        ids.forEach((id, index) => {
-          results[id] = responses[index];
-        });
-      });
+        const data = await response.json();
+        const imdbId = data.external_ids?.imdb_id;
 
-      res.json(results);
+        if (!imdbId) {
+            throw new Error('No IMDB ID found');
+        }
+
+        // Cache the conversion
+        cache.set(cacheKey, imdbId);
+        return imdbId;
     } catch (error) {
-      res.status(500).json({ error: error.message });
+        console.error(`TMDB conversion error for ID ${tmdbId}:`, error);
+        throw error;
     }
-  }
-};
+}
 
-initCache();
+function getNextHealthyWorker() {
+    const startIndex = currentWorkerIndex;
+    const now = Date.now();
+
+    do {
+        const worker = WORKERS[currentWorkerIndex];
+        const health = workerHealth.get(worker);
+        
+        if (!health.isHealthy && now - health.lastCheck > 5 * 60 * 1000) {
+            health.isHealthy = true;
+            health.failCount = 0;
+        }
+
+        if (health.isHealthy) {
+            currentWorkerIndex = (currentWorkerIndex + 1) % WORKERS.length;
+            return worker;
+        }
+
+        currentWorkerIndex = (currentWorkerIndex + 1) % WORKERS.length;
+    } while (currentWorkerIndex !== startIndex);
+
+    WORKERS.forEach(worker => {
+        const health = workerHealth.get(worker);
+        health.isHealthy = true;
+        health.failCount = 0;
+        health.lastCheck = now;
+    });
+
+    return WORKERS[0];
+}
+
+async function fetchFromWorker(worker, imdbIds) {
+    const params = new URLSearchParams();
+    params.set('imdb_ids', imdbIds.join(','));
+    
+    try {
+        console.log(`Fetching from worker ${worker} with IDs:`, imdbIds);
+        const response = await fetch(`${worker}/?${params}`, {
+            headers: {
+                'Accept': 'application/json'
+            }
+        });
+
+        if (!response.ok) {
+            throw new Error(`Worker responded with ${response.status}`);
+        }
+        
+        const data = await response.json();
+        
+        const health = workerHealth.get(worker);
+        health.isHealthy = true;
+        health.failCount = 0;
+        health.lastCheck = Date.now();
+        
+        return data;
+    } catch (error) {
+        console.error(`Worker ${worker} failed:`, error);
+        
+        const health = workerHealth.get(worker);
+        health.failCount += 1;
+        health.lastCheck = Date.now();
+        
+        if (health.failCount >= 3) {
+            health.isHealthy = false;
+        }
+        
+        return null;
+    }
+}
+
+export const qualityController = {
+    async getQualityInfo(req, res) {
+        const { imdb_ids, tmdb_ids } = req.query;
+        
+        if (!imdb_ids && !tmdb_ids) {
+            return res.status(400).json({ error: 'Missing IDs' });
+        }
+
+        try {
+            const results = {};
+            let allImdbIds = [];
+            
+            // Process IMDB IDs
+            if (imdb_ids) {
+                allImdbIds.push(...imdb_ids.split(','));
+            }
+            
+            // Convert TMDB IDs to IMDB IDs
+            if (tmdb_ids) {
+                const ids = tmdb_ids.split(',');
+                for (const tmdbId of ids) {
+                    try {
+                        const imdbId = await convertTmdbToImdb(tmdbId);
+                        allImdbIds.push(imdbId);
+                        // Store the mapping for later
+                        results[tmdbId] = { pending: imdbId };
+                    } catch (error) {
+                        console.error(`Failed to convert TMDB ID ${tmdbId}:`, error);
+                        results[tmdbId] = { error: 'TMDB conversion failed' };
+                    }
+                }
+            }
+
+            // Remove duplicates
+            allImdbIds = [...new Set(allImdbIds)];
+            
+            // Check cache for all IMDB IDs
+            const uncachedIds = [];
+            allImdbIds.forEach(id => {
+                const cached = cache.get(`imdb-${id}`);
+                if (cached) {
+                    results[id] = cached;
+                } else {
+                    uncachedIds.push(id);
+                }
+            });
+            
+            // Fetch uncached IDs
+            if (uncachedIds.length > 0) {
+                const worker = getNextHealthyWorker();
+                console.log(`Using worker ${worker} for IDs:`, uncachedIds);
+                
+                const workerResults = await fetchFromWorker(worker, uncachedIds);
+                
+                if (workerResults) {
+                    Object.entries(workerResults).forEach(([id, data]) => {
+                        if (!data.error) {
+                            results[id] = data;
+                            cache.set(`imdb-${id}`, data);
+                        }
+                    });
+                }
+            }
+
+            // Map back TMDB results
+            if (tmdb_ids) {
+                const tmdbResults = {};
+                tmdb_ids.split(',').forEach(tmdbId => {
+                    const mapping = results[tmdbId];
+                    if (mapping?.pending) {
+                        tmdbResults[tmdbId] = results[mapping.pending];
+                    } else {
+                        tmdbResults[tmdbId] = mapping;
+                    }
+                });
+                
+                // Replace results with TMDB mapping if only TMDB IDs were requested
+                if (!imdb_ids) {
+                    Object.assign(results, tmdbResults);
+                }
+            }
+
+            const stats = cache.getStats();
+            console.log('Cache stats:', stats);
+
+            res.json(results);
+        } catch (error) {
+            console.error('Error in quality controller:', error);
+            res.status(500).json({ error: error.message });
+        }
+    }
+};

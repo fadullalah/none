@@ -1,5 +1,6 @@
 import puppeteer from 'puppeteer-extra';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
+import { getProxyEnabledBrowserOptions } from './proxy-integration.js';
 
 // Configure stealth plugin with additional options
 const stealth = StealthPlugin();
@@ -47,6 +48,20 @@ export const browserOptions = {
 const getRandomUserAgent = () => {
   return userAgents[Math.floor(Math.random() * userAgents.length)];
 };
+
+async function getBrowser() {
+  try {
+      if (!browserInstance || !browserInstance.isConnected()) {
+          console.log('[Browser] Creating new browser instance');
+          browserInstance = await puppeteer.launch(getProxyEnabledBrowserOptions());
+      }
+      return browserInstance;
+  } catch (error) {
+      console.error('[Browser] Launch error:', error);
+      browserInstance = null;
+      throw error;
+  }
+}
 
 // Function to clear browser data
 export async function clearBrowserData(page) {

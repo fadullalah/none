@@ -1,6 +1,7 @@
 import NodeCache from 'node-cache';
 import _ from 'lodash';
 import fetch from 'node-fetch';
+import { withProxy } from '../utils/proxy-integration.js';
 
 // Initialize cache with 24 hour TTL
 const cache = new NodeCache({ stdTTL: 24 * 60 * 60 });
@@ -30,8 +31,11 @@ async function convertTmdbToImdb(tmdbId) {
     if (cached) return cached;
 
     try {
-        const response = await fetch(
-            `https://api.themoviedb.org/3/movie/${tmdbId}?api_key=${TMDB_API_KEY}&append_to_response=external_ids`
+        const response = await withProxy(config => 
+            fetch(
+                `https://api.themoviedb.org/3/movie/${tmdbId}?api_key=${TMDB_API_KEY}&append_to_response=external_ids`,
+                config
+            )
         );
 
         if (!response.ok) {

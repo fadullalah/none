@@ -2,6 +2,7 @@ import { v4 as uuidv4 } from 'uuid';
 import puppeteer from 'puppeteer-extra';
 import { browserOptions, customNavigate } from '../utils/browser.js';
 import { convertToDirectUrl } from '../utils/url-converter.js';
+import { withProxy } from '../utils/proxy-integration.js';
 
 const videoStore = new Map();
 let browserInstance = null;
@@ -110,7 +111,8 @@ async function getVideoUrl(page, embedUrl) {
           try {
             const responseStartTime = performance.now();
             responseUrl = url;
-            const data = await response.json();
+            // Wrap the response.json() call with withProxy
+            const data = await withProxy(async () => await response.json());
             apiResponseTime = getTimeDiff(responseStartTime);
             console.log(`[Browser] API response captured in: ${apiResponseTime}`);
             apiResponseData = data;
@@ -120,20 +122,21 @@ async function getVideoUrl(page, embedUrl) {
             console.log('[Browser] Failed to parse API response:', e.message);
           }
         }
-      });
-    });
+      });    });
 
     // Navigate to page with shorter timeout
     console.log('[Browser] Navigating to page');
     const navigationStartTime = performance.now();
     
     await Promise.race([
-      page.goto(embedUrl, {
-        waitUntil: 'domcontentloaded',
-        timeout: 10000
-      }),
+      withProxy(async () => 
+        await page.goto(embedUrl, {
+          waitUntil: 'domcontentloaded',
+          timeout: 10000
+        })
+      ),
       responsePromise
-    ]);
+    ]);    
 
     console.log(`[Time] Navigation took: ${getTimeDiff(navigationStartTime)}`);
 

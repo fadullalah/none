@@ -1,6 +1,8 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
+import puppeteer from 'puppeteer-extra';
+import { browserOptions, createStealthPage } from './utils/browser.js';
 import videoRoutes from './routes/video.routes.js';
 
 // Load environment variables
@@ -21,8 +23,43 @@ app.use(cors({
 app.use('/api', videoRoutes);
 
 // Health check endpoint
-app.get('/health', (req, res) => {
-  res.json({ status: 'OK', timestamp: new Date().toISOString() });
+app.get('/health', async (req, res) => {
+  try {
+    // Launch browser with stealth settings
+    const browser = await puppeteer.launch(browserOptions);
+    const page = await createStealthPage(browser);
+    
+    // Test access to vidlink.pro
+    const response = await page.goto('https://vidlink.pro', {
+      waitUntil: 'domcontentloaded',
+      timeout: 10000
+    });
+
+    await browser.close();
+
+    // Check response status
+    const isAccessible = response.status() === 200;
+
+    res.json({
+      status: isAccessible ? 'OK' : 'BLOCKED',
+      timestamp: new Date().toISOString(),
+      vidlink: {
+        accessible: isAccessible,
+        statusCode: response.status(),
+        headers: response.headers()
+      }
+    });
+
+  } catch (error) {
+    res.json({
+      status: 'ERROR',
+      timestamp: new Date().toISOString(),
+      vidlink: {
+        accessible: false,
+        error: error.message
+      }
+    });
+  }
 });
 
 // Error handling middleware

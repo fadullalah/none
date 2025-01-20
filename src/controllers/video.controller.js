@@ -130,10 +130,12 @@ async function getVideoUrl(page, embedUrl) {
     
     await Promise.race([
       withProxy(async () => 
-        await page.goto(embedUrl, {
-          waitUntil: 'domcontentloaded',
-          timeout: 10000
-        })
+      await withProxy(async () => 
+          await page.goto(embedUrl, {
+              waitUntil: 'domcontentloaded',
+              timeout: 10000
+          })
+      )
       ),
       responsePromise
     ]);    

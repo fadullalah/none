@@ -5,6 +5,7 @@ import { imageController } from '../controllers/image.controller.js';
 import { imageLoaderController } from '../controllers/imageLoader.controller.js';
 import { tmdbController } from '../controllers/tmdb.controller.js';
 import { qualityController } from '../controllers/quality.controller.js';
+import { scraperController } from '../controllers/scraper.controller.js';
 
 const router = express.Router();
 
@@ -17,6 +18,7 @@ router.get('/image', imageController.downloadImage);
 router.get('/preload-images', imageLoaderController.preloadImages);
 router.get('/trending-posters', tmdbController.getTrendingPosters);
 router.get('/random-backdrops', tmdbController.getRandomBackdrops);
+router.get('/scrape/movie/:tmdb_id', scraperController.scrapeMovieLinks);
 
 // New quality route
 router.get('/quality', qualityController.getQualityInfo);

@@ -157,6 +157,8 @@ export async function createStealthPage(browser) {
   return page;
 }
 
+const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+
 // Enhanced navigation function with retry logic
 export async function customNavigate(page, url, maxRedirects = 3, maxRetries = 3) {
   let currentUrl = url;
@@ -166,7 +168,7 @@ export async function customNavigate(page, url, maxRedirects = 3, maxRetries = 3
   while (retryCount < maxRetries) {
     try {
       // Add random delay before navigation
-      await page.waitForTimeout(Math.floor(Math.random() * 2000) + 1000);
+      await delay(Math.floor(Math.random() * 2000) + 1000);
       
       redirectCount = 0;
       while (redirectCount < maxRedirects) {
@@ -186,7 +188,7 @@ export async function customNavigate(page, url, maxRedirects = 3, maxRetries = 3
         redirectCount++;
         
         // Random delay between redirects
-        await page.waitForTimeout(Math.floor(Math.random() * 1000) + 500);
+        await delay(Math.floor(Math.random() * 1000) + 500);
       }
       
       return currentUrl;
@@ -199,7 +201,7 @@ export async function customNavigate(page, url, maxRedirects = 3, maxRetries = 3
       }
       
       // Exponential backoff
-      await page.waitForTimeout(Math.pow(2, retryCount) * 1000);
+      await delay(Math.pow(2, retryCount) * 1000);
     }
   }
 }

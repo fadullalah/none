@@ -19,7 +19,12 @@ const WORKERS = [
     'https://q-s6.wee-skink-xikl.workers.dev',
     'https://q-s8.stuck-giraffe-ltth.workers.dev',
     'https://q-s9.semantic-possum-zrru.workers.dev',
-    'https://q-s10.accessible-sole-vjmz.workers.dev'
+    'https://q-s10.accessible-sole-vjmz.workers.dev',
+    'https://q-s11.vicarious-chickadee-apnp.workers.dev',
+    'https://q-s12.cuddly-vulture-veje.workers.dev',
+    'https://q-s13.disappointed-ladybug-bdlb.workers.dev',
+    'https://q-s14.javap81774.workers.dev',
+    'https://q-s15.causal-dragon-upft.workers.dev'
 ];
 
 const workerHealth = new Map(WORKERS.map(worker => [worker, { 

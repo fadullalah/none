@@ -17,7 +17,7 @@ const userAgents = [
 ];
 
 export const browserOptions = {
-  headless: true,
+  headless: 'new',
   args: [
     '--no-sandbox',
     '--disable-setuid-sandbox',
@@ -35,7 +35,10 @@ export const browserOptions = {
     '--hide-scrollbars',
     '--mute-audio',
     '--disable-gpu',
-    '--incognito'
+    '--incognito',
+    '--disable-dev-shm-usage',
+    '--disable-accelerated-2d-canvas', 
+    '--disable-extensions'
   ],
   ignoreDefaultArgs: ['--enable-automation', '--enable-blink-features=AutomationControlled'],
   defaultViewport: {

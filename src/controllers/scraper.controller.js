@@ -32,30 +32,68 @@ export const scraperController = {
       const downloadData = await page.evaluate(() => {
         const entries = document.querySelectorAll('.entry');
         const releases = [];
-
+      
         entries.forEach(entry => {
+          const morespecElement = entry.querySelector('.morespec');
+          const releaseName = morespecElement?.textContent.trim() || '';
           const nfoContent = entry.querySelector('.nfo pre')?.textContent || '';
-          const quality = entry.querySelector('.audiotag:first-child')?.textContent.match(/\d+p/) || ['unknown'];
-          const sizeElement = Array.from(entry.querySelectorAll('.audiotag small')).find(el => el.textContent === 'Größe:');
+      
+          // Get resolution from audiotag spans
+          const resolutionElement = Array.from(entry.querySelectorAll('.audiotag small')).find(el => 
+            el.textContent.includes('Auflösung:')
+          );
+      
+          let quality = {
+            resolution: 'unknown',
+            source: 'unknown',
+            codec: 'unknown'
+          };
+      
+          // Check morespec span first
+          if (morespecElement) {
+            const morespecText = morespecElement.textContent;
+            quality.resolution = morespecText.match(/\d+p/)?.[0] || 
+                                morespecText.match(/\d{3,4}x\d{3,4}/)?.[0] || 
+                                quality.resolution;
+            quality.source = morespecText.match(/(?:BluRay|WEB-DL|WEBRiP|HDRip|BRRip|TS|HD|UHD)/i)?.[0] || quality.source;
+            quality.codec = morespecText.match(/(?:x264|x265|HEVC|AVC)/i)?.[0] || quality.codec;
+          }
+      
+          // Update resolution from audiotag if found
+          if (resolutionElement) {
+            quality.resolution = resolutionElement.nextSibling?.textContent.trim() || quality.resolution;
+          }
+      
+          // Get size from audiotag spans
+          const sizeElement = Array.from(entry.querySelectorAll('.audiotag small')).find(el => 
+            el.textContent.includes('Größe:')
+          );
           const size = sizeElement?.nextSibling?.textContent.trim() || 'unknown';
-          
-          const downloadLinks = Array.from(entry.querySelectorAll('.dlb.row')).map(link => ({
-            url: link.href,
-            hoster: link.querySelector('.col span')?.textContent?.trim() || 'unknown'
-          }));
-
+      
           releases.push({
-            quality: quality[0],
-            size: size,
-            nfo: nfoContent,
-            links: downloadLinks,
-            audio: entry.querySelector('.audiotag img[src*="DE.svg"]') ? 'German' : 'unknown',
-            releaseGroup: entry.querySelector('.audiotag:last-child')?.textContent.trim() || 'unknown'
+            releaseName,
+            quality,
+            size,
+            audio: {
+              languages: {
+                german: entry.querySelector('.audiotag img[src*="DE.svg"]') !== null || nfoContent.includes('German'),
+                english: entry.querySelector('.audiotag img[src*="EN.svg"]') !== null || nfoContent.includes('English')
+              },
+              format: nfoContent.match(/(?:DTS|DD\+|AAC|AC3|EAC3)/i)?.[0] || 'unknown',
+              channels: nfoContent.match(/(?:\d\.\d(?:\s*channels)?|\d\s*Kanäle)/i)?.[0] || 'unknown'
+            },
+            releaseGroup: releaseName.split('-').pop() || 'unknown',
+            uploadDate: entry.querySelector('.date')?.textContent.trim() || 'unknown',
+            technicalDetails: {
+              duration: nfoContent.match(/(?:duration|dauer).*?(\d+\s*h\s*\d+\s*min)/i)?.[1] || 'unknown',
+              container: nfoContent.match(/Format\s*:\s*([^\n]+)/i)?.[1] || 'unknown',
+              videoFormat: nfoContent.match(/Video.*?Format\s*:\s*([^\n]+)/i)?.[1] || 'unknown'
+            }
           });
         });
-
+      
         return { releases, totalReleases: releases.length };
-      });
+      });      
 
       res.json({
         success: true,

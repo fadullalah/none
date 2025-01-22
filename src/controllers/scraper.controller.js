@@ -70,6 +70,14 @@ export const scraperController = {
           );
           const size = sizeElement?.nextSibling?.textContent.trim() || 'unknown';
       
+          // Get all download links from the entry
+          const downloadLinks = Array.from(entry.querySelectorAll('.dlb.row')).map(link => ({
+            url: link.href,
+            hoster: link.querySelector('.col span')?.textContent?.trim() || 'unknown',
+            isProtected: link.classList.contains('protected'),
+            isPremium: link.classList.contains('premium')
+          }));
+      
           releases.push({
             releaseName,
             quality,
@@ -88,13 +96,13 @@ export const scraperController = {
               duration: nfoContent.match(/(?:duration|dauer).*?(\d+\s*h\s*\d+\s*min)/i)?.[1] || 'unknown',
               container: nfoContent.match(/Format\s*:\s*([^\n]+)/i)?.[1] || 'unknown',
               videoFormat: nfoContent.match(/Video.*?Format\s*:\s*([^\n]+)/i)?.[1] || 'unknown'
-            }
+            },
+            links: downloadLinks  // Added the download links here
           });
         });
       
         return { releases, totalReleases: releases.length };
-      });      
-
+      });
       res.json({
         success: true,
         movie: {

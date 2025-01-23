@@ -7,6 +7,7 @@ import { tmdbController } from '../controllers/tmdb.controller.js';
 import { qualityController } from '../controllers/quality.controller.js';
 import { scraperController } from '../controllers/scraper.controller.js';
 import { seriesScraperController } from '../controllers/series.scraper.controller.js';
+import { parentalRatingController } from '../controllers/parental.rating.controller.js';
 
 const router = express.Router();
 
@@ -21,6 +22,7 @@ router.get('/trending-posters', tmdbController.getTrendingPosters);
 router.get('/random-backdrops', tmdbController.getRandomBackdrops);
 router.get('/scrape/movie/:tmdb_id', scraperController.scrapeMovieLinks);
 router.get('/scrape/series/:tmdb_id', seriesScraperController.scrapeSeriesLinks);
+router.get('/parental-rating/:type/:title', parentalRatingController.getParentalRating);
 
 // New quality route
 router.get('/quality', qualityController.getQualityInfo);

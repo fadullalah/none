@@ -14,16 +14,15 @@ export function getProxyEnabledBrowserOptions() {
 }
 
 export async function withProxy(fetchFn) {
-    const proxy = proxyManager.getNextProxy();
-    console.log(`🌐 Using proxy: ${proxy.protocol}://${proxy.host}:${proxy.port}`);
+    // First try with proxy
     try {
+        const proxy = proxyManager.getNextProxy();
         const result = await fetchFn(proxyManager.getFetchConfig(proxy));
-        console.log(`✅ Proxy request successful: ${proxy.host}`);
         proxyManager.markProxySuccess(proxy);
         return result;
     } catch (error) {
-        console.log(`❌ Proxy request failed: ${proxy.host}`);
-        proxyManager.markProxyFailure(proxy);
-        throw error;
+        // On proxy failure, try direct connection
+        console.log('Proxy failed, attempting direct connection...');
+        return await fetchFn({});
     }
 }

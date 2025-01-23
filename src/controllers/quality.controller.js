@@ -41,32 +41,25 @@ async function convertTmdbToImdb(tmdbId) {
     const cached = cache.get(cacheKey);
     if (cached) return cached;
 
-    try {
-        const response = await withProxy(config => 
-            fetch(
-                `https://api.themoviedb.org/3/movie/${tmdbId}?api_key=${TMDB_API_KEY}&append_to_response=external_ids`,
-                config
-            )
-        );
+    const response = await withProxy(config => 
+        fetch(
+            `https://api.themoviedb.org/3/movie/${tmdbId}?api_key=${TMDB_API_KEY}&append_to_response=external_ids`,
+            {
+                ...config,
+                timeout: 15000
+            }
+        )
+    );
 
-        if (!response.ok) {
-            throw new Error(`TMDB API error: ${response.status}`);
-        }
+    const data = await response.json();
+    const imdbId = data.external_ids?.imdb_id;
 
-        const data = await response.json();
-        const imdbId = data.external_ids?.imdb_id;
-
-        if (!imdbId) {
-            throw new Error('No IMDB ID found');
-        }
-
-        // Cache the conversion
+    if (imdbId) {
         cache.set(cacheKey, imdbId);
         return imdbId;
-    } catch (error) {
-        console.error(`TMDB conversion error for ID ${tmdbId}:`, error);
-        throw error;
     }
+
+    throw new Error('No IMDB ID found');
 }
 
 function getNextHealthyWorker() {

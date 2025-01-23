@@ -24,8 +24,7 @@ const WORKERS = [
     'https://q-s12.cuddly-vulture-veje.workers.dev',
     'https://q-s13.disappointed-ladybug-bdlb.workers.dev',
     'https://q-s14.javap81774.workers.dev',
-    'https://q-s15.causal-dragon-upft.workers.dev',
-    'https://q-s16.enchanting-caribou-irrw.workers.dev'
+    'https://q-s15.causal-dragon-upft.workers.dev'
 ];
 
 const workerHealth = new Map(WORKERS.map(worker => [worker, { 
@@ -42,25 +41,32 @@ async function convertTmdbToImdb(tmdbId) {
     const cached = cache.get(cacheKey);
     if (cached) return cached;
 
-    const response = await withProxy(config => 
-        fetch(
-            `https://api.themoviedb.org/3/movie/${tmdbId}?api_key=${TMDB_API_KEY}&append_to_response=external_ids`,
-            {
-                ...config,
-                timeout: 15000
-            }
-        )
-    );
+    try {
+        const response = await withProxy(config => 
+            fetch(
+                `https://api.themoviedb.org/3/movie/${tmdbId}?api_key=${TMDB_API_KEY}&append_to_response=external_ids`,
+                config
+            )
+        );
 
-    const data = await response.json();
-    const imdbId = data.external_ids?.imdb_id;
+        if (!response.ok) {
+            throw new Error(`TMDB API error: ${response.status}`);
+        }
 
-    if (imdbId) {
+        const data = await response.json();
+        const imdbId = data.external_ids?.imdb_id;
+
+        if (!imdbId) {
+            throw new Error('No IMDB ID found');
+        }
+
+        // Cache the conversion
         cache.set(cacheKey, imdbId);
         return imdbId;
+    } catch (error) {
+        console.error(`TMDB conversion error for ID ${tmdbId}:`, error);
+        throw error;
     }
-
-    throw new Error('No IMDB ID found');
 }
 
 function getNextHealthyWorker() {

@@ -10,81 +10,103 @@ export const parentalRatingController = {
     let targetUrl = '';
 
     try {
-        const formattedTitle = title.toLowerCase()
+      const formattedTitle = title.toLowerCase()
         .replace(/[^a-z0-9]+/g, '-')
         .replace(/-+/g, '-')
         .replace(/^-|-$/g, '');
       
-      // Dynamic URL based on content type
       targetUrl = type === 'movie' 
         ? `https://www.commonsensemedia.org/movie-reviews/${formattedTitle}`
         : `https://www.commonsensemedia.org/tv-reviews/${formattedTitle}`;
       
-      console.log('🔍 Scraping URL:', targetUrl);
+      console.log('🚀 Speed-scraping URL:', targetUrl);
 
       browser = await puppeteer.launch(getProxyEnabledBrowserOptions());
       page = await createStealthPage(browser);
-      await page.setDefaultNavigationTimeout(60000);
 
+      // Turbo mode configurations
       await page.setRequestInterception(true);
-      page.on('request', (request) => {
-        if (['image', 'stylesheet', 'font'].includes(request.resourceType())) {
-          request.abort();
-        } else {
+      page.on('request', request => {
+        const resourceType = request.resourceType();
+        const url = request.url();
+        
+        // Only allow essential requests
+        if (
+          resourceType === 'document' ||
+          (resourceType === 'script' && url.includes('commonsensemedia.org')) ||
+          (resourceType === 'xhr' && url.includes('api'))
+        ) {
           request.continue();
+        } else {
+          request.abort();
         }
       });
 
-      console.log('⏳ Navigating to page...');
-      await page.goto(targetUrl, { waitUntil: 'domcontentloaded' });
+      // Performance optimizations
+      await page.setViewport({ width: 800, height: 600 });
+      await page.setDefaultNavigationTimeout(15000);
+      
+      // Disable heavy browser features
+      await page.evaluateOnNewDocument(() => {
+        window.analytics = null;
+        window.google_analytics = null;
+        window.ga = null;
+        window._gaq = null;
+        window.dataLayer = null;
+        window.optimizely = null;
+        window.WebFont = null;
+      });
 
-      // Wait for content to load
-      await page.waitForSelector('.review-view-rate, button.rating--interactive', { timeout: 30000 });
+      // Parallel loading strategy
+      const navigationPromise = page.goto(targetUrl, { 
+        waitUntil: 'domcontentloaded',
+        timeout: 8000 
+      });
 
-      console.log('📝 Extracting rating data...');
+      const selectorPromise = Promise.race([
+        page.waitForSelector('.review-view-rate', { timeout: 5000 }),
+        page.waitForSelector('button.rating--interactive', { timeout: 5000 })
+      ]);
+
+      await Promise.all([navigationPromise, selectorPromise]);
+      // Quick data extraction
       const ratingData = await page.evaluate(() => {
-        const getTextContent = (selector) => {
-            const element = document.querySelector(selector);
-            return element ? element.textContent.trim() : null;
+        const getTextContent = selector => document.querySelector(selector)?.textContent?.trim() || null;
+
+        // Dynamic category extraction
+        const getAllRatingDetails = () => {
+            const details = {};
+            const ratingButtons = Array.from(document.querySelectorAll('button.rating--interactive'));
+            
+            ratingButtons.forEach(button => {
+                const label = button.querySelector('.rating__label')?.textContent?.trim();
+                if (label) {
+                    const categoryKey = label.toLowerCase()
+                        .replace(/[^a-z0-9]+/g, '_')
+                        .replace(/_+/g, '_')
+                        .replace(/^_|_$/g, '');
+                    
+                    const parentDiv = button.closest('.content-grid-content');
+                    details[categoryKey] = {
+                        label: label,
+                        rating: parentDiv?.getAttribute('data-text')?.replace(/<\/?p>/g, '').trim() || null,
+                        description: button.querySelector('.rating__teaser')?.textContent?.trim() || null,
+                        score: button.querySelectorAll('.rating__score i.active').length || 0
+                    };
+                }
+            });
+            
+            return details;
         };
-
-        const getRatingDetails = (category) => {
-            // Find the button containing this category
-            const button = Array.from(document.querySelectorAll('button.rating--interactive')).find(btn => 
-                btn.querySelector('.rating__label')?.textContent.trim().toLowerCase().includes(category.toLowerCase())
-            );
-              
-            if (!button) return null;
-
-            // Get the parent div that contains the data-text attribute
-            const parentDiv = button.closest('.content-grid-content');
-              
-            return {
-                rating: parentDiv?.getAttribute('data-text')?.replace(/<\/?p>/g, '').trim() || null,
-                description: button.querySelector('.rating__teaser')?.textContent.trim() || null,
-                score: Array.from(button.querySelectorAll('.rating__score i.active')).length || 0
-            };
-        };
-
-        const parentsGuide = document.querySelector('.paragraph-inline p')?.textContent.trim();
 
         return {
             ageRating: getTextContent('.rating__age'),
             summary: getTextContent('.review-view-summary-oneliner'),
-            parentsGuide: parentsGuide,
-            details: {
-                sex: getRatingDetails('Sex'),
-                violence: getRatingDetails('Violence'),
-                language: getRatingDetails('Language'),
-                drugs: getRatingDetails('Drinking'),
-                consumerism: getRatingDetails('Products'),
-                positiveMessages: getRatingDetails('Positive Messages'),
-                roleModels: getRatingDetails('Role Models'),
-                diversity: getRatingDetails('Diverse')
-            }
+            parentsGuide: getTextContent('.paragraph-inline p'),
+            details: getAllRatingDetails()
         };
-    });
-      console.log('✅ Data extracted successfully');
+      });
+      console.log('⚡ Data extracted at light speed');
       
       res.json({
         success: true,
@@ -95,7 +117,7 @@ export const parentalRatingController = {
       });
 
     } catch (error) {
-      console.error('❌ Scraping failed:', error);
+      console.error('❌ Speed scraping failed:', error);
       res.status(500).json({
         success: false,
         error: error.message,
@@ -104,14 +126,8 @@ export const parentalRatingController = {
         url: targetUrl
       });
     } finally {
-      if (page) {
-        console.log('🔒 Closing page...');
-        await page.close();
-      }
-      if (browser) {
-        console.log('🔒 Closing browser...');
-        await browser.close();
-      }
+      if (page) await page.close();
+      if (browser) await browser.close();
     }
   }
 };

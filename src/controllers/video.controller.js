@@ -1,7 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import puppeteer from 'puppeteer-extra';
-import { browserOptions, customNavigate } from '../utils/browser.js';
 import { convertToDirectUrl } from '../utils/url-converter.js';
+import { getProxyEnabledBrowserOptions } from '../utils/proxy-integration.js';
 import { withProxy } from '../utils/proxy-integration.js';
 
 const videoStore = new Map();
@@ -16,14 +16,7 @@ async function getBrowser() {
   try {
     if (!browserInstance || !browserInstance.isConnected()) {
       console.log('[Browser] Creating new browser instance');
-      browserInstance = await puppeteer.launch({
-        ...browserOptions,
-        args: [
-          ...browserOptions.args,
-          '--no-zygote',
-          '--disable-dev-shm-usage'
-        ]
-      });
+      browserInstance = await puppeteer.launch(getProxyEnabledBrowserOptions());
     }
     return browserInstance;
   } catch (error) {

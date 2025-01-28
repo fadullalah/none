@@ -8,19 +8,69 @@ const UI_TOKENS = [
   'eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpYXQiOjE3MzE1Mjc1NTIsIm5iZiI6MTczMTUyNzU1MiwiZXhwIjoxNzYyNjMxNTcyLCJkYXRhIjp7InVpZCI6MzYxNTkxLCJ0b2tlbiI6Ijc4NjdlYzc2NzcwODAyNjcxNWNlNTZjMWJiZDI1N2NkIn19.vXKdWeU8R_xe4gUMBg-hIxkftFogPdZEGtXvAw0IC-Q'
 ];
 
+async function searchShowboxByTitle(title, type, year) {
+  console.log(`🔎 Searching ShowBox for: "${title}" (${year}) [${type}]`);
+  const searchUrl = `https://showbox.media/search?keyword=${encodeURIComponent(title)}`;
+  console.log(`📡 Search URL: ${searchUrl}`);
+  
+  const response = await fetch(searchUrl);
+  const html = await response.text();
+  const $ = cheerio.load(html);
+  
+  const results = $('.flw-item').map((_, item) => {
+    const link = $(item).find('.film-poster-ahref').attr('href');
+    const itemTitle = $(item).find('.film-name').text().trim();
+    const yearText = $(item).find('.film-year, .year, [class*="year"]').text().trim();
+    const yearMatch = yearText.match(/\d{4}/);
+    const itemYear = yearMatch ? parseInt(yearMatch[0]) : null;
+    
+    console.log(`📺 Found result: "${itemTitle}" (${itemYear || 'Unknown Year'}) - ${link}`);
+    return {
+      title: itemTitle,
+      year: itemYear,
+      link: link,
+      id: link ? link.split('/detail/')[1] : null
+    };
+  }).get();
+
+  const exactMatch = results.find(result => {
+    const titleMatch = result.title.toLowerCase() === title.toLowerCase();
+    const yearMatch = !year || !result.year || Math.abs(result.year - year) <= 1;
+    return titleMatch && yearMatch;
+  });
+
+  if (exactMatch) {
+    console.log(`✅ Found match: ${exactMatch.title} (${exactMatch.year}) - ID: ${exactMatch.id}`);
+  } else {
+    console.log(`❌ No match found for "${title}" (${year})`);
+    console.log('Available results:', JSON.stringify(results, null, 2));
+  }
+
+  return exactMatch;
+}
+
 export const showboxController = {
   async getShowboxUrl(req, res) {
     const { type, tmdbId } = req.params;
-    const { season, episode } = req.query; // Extract season and episode from query params
+    const { season, episode } = req.query;
     let browser = null;
     let page = null;
     let targetUrl = '';
+    let tmdbData = null;
+
+    console.log(`\n🎬 Starting ShowBox scrape for TMDB ID: ${tmdbId} [${type}]`);
+    console.log(`📺 Season: ${season}, Episode: ${episode}`);
 
     try {
+      console.log(`🎯 Fetching TMDB data...`);
       const tmdbResponse = await fetch(
         `https://api.themoviedb.org/3/${type}/${tmdbId}?api_key=${process.env.API_TOKEN}`
       );
-      const tmdbData = await tmdbResponse.json();
+      tmdbData = await tmdbResponse.json();
+      console.log(`📊 TMDB Response:`, {
+        title: tmdbData.title || tmdbData.name,
+        release_date: tmdbData.release_date || tmdbData.first_air_date
+      });
 
       const title = tmdbData.title || tmdbData.name;
       const year = new Date(tmdbData.release_date || tmdbData.first_air_date).getFullYear();
@@ -33,9 +83,33 @@ export const showboxController = {
       const prefix = type === 'movie' ? 'm-' : 't-';
       targetUrl = `https://www.showbox.media/${type}/${prefix}${formattedTitle}-${year}`;
       
-      console.log('🎯 Navigating to Showbox:', targetUrl);
+      console.log(`🎯 Initial target URL: ${targetUrl}`);
+      let response = await fetch(targetUrl);
+      console.log(`📊 Initial response status: ${response.status}`);
+      
+      if (!response.ok) {
+        console.log('⚠️ Title-based URL failed, initiating search fallback...');
+        const searchResult = await searchShowboxByTitle(title, type, year);
+        
+        if (searchResult) {
+          targetUrl = `https://www.showbox.media/${type}/detail/${searchResult.id}`;
+          console.log(`🎯 New target URL from search: ${targetUrl}`);
+          response = await fetch(targetUrl);
+          if (!response.ok) {
+            throw new Error('Search result URL not accessible');
+          }
+        } else {
+          throw new Error('Show not found via title or search');
+        }
+      }
 
-      browser = await puppeteer.launch(getProxyEnabledBrowserOptions());
+      console.log('🌐 Launching browser...');
+      browser = await puppeteer.launch({
+        ...getProxyEnabledBrowserOptions(),
+        headless: false
+      });
+      
+      console.log('📄 Creating new page...');
       page = await createStealthPage(browser);
 
       await page.setRequestInterception(true);
@@ -48,18 +122,22 @@ export const showboxController = {
         }
       });
 
+      console.log('🚀 Navigating to target URL...');
       await page.goto(targetUrl, { waitUntil: 'domcontentloaded' });
 
       const isEpisodeList = await page.evaluate(() => {
         return !!document.querySelector('.seasons-list-new');
       });
+      console.log(`📺 Is episode list page: ${isEpisodeList}`);
 
       if (isEpisodeList) {
+        console.log('🎯 Handling TV show episode...');
         await page.waitForSelector('.eps-item');
         const firstEpisode = await page.$('.eps-item');
         if (!firstEpisode) throw new Error('No episodes found');
         await firstEpisode.click();
       } else {
+        console.log('🎯 Handling movie...');
         const playButton = await page.evaluate(() => {
           const selectors = [
             '.play_button',
@@ -77,9 +155,11 @@ export const showboxController = {
         });
 
         if (!playButton) throw new Error('Play button not found');
+        console.log(`🎯 Found play button: ${playButton}`);
         await page.click(playButton);
       }
 
+      console.log('⏳ Waiting for download app button...');
       await page.waitForSelector('.download_app', { timeout: 10000 });
 
       const newPagePromise = new Promise(resolve => {
@@ -92,6 +172,7 @@ export const showboxController = {
         });
       });
 
+      console.log('🖱️ Clicking download app button...');
       await page.click('.download_app');
 
       const newPage = await Promise.race([
@@ -100,6 +181,7 @@ export const showboxController = {
       ]);
 
       const febboxUrl = await newPage.evaluate(() => window.location.href);
+      console.log(`🔗 FebBox URL: ${febboxUrl}`);
       const shareKey = febboxUrl.split('/share/')[1];
       
       const shareInfoUrl = `https://www.febbox.com/file/share_info?key=${shareKey}`;
@@ -215,6 +297,7 @@ export const showboxController = {
       // Movie logic
       const firstFile = $('.file').first();
       const fid = firstFile.attr('data-id');
+      console.log(`🎬 Found movie file ID: ${fid}`);
       const streamLinks = await getStreamLinks(fid);
 
       res.json({
@@ -229,7 +312,16 @@ export const showboxController = {
       });
 
     } catch (error) {
-      console.error('❌ Showbox scraping failed:', error);
+      console.error('❌ ShowBox scraping failed:', {
+        error: error.message,
+        stack: error.stack,
+        tmdbId,
+        type,
+        targetUrl,
+        title: tmdbData?.title || tmdbData?.name || 'Unknown',
+        year: tmdbData?.release_date || tmdbData?.first_air_date || 'Unknown'
+      });
+      
       res.status(500).json({
         success: false,
         error: error.message,
@@ -238,14 +330,20 @@ export const showboxController = {
         attempted_url: targetUrl
       });
     } finally {
-      if (page) await page.close();
-      if (browser) await browser.close();
+      if (page) {
+        console.log('📄 Closing page...');
+        await page.close();
+      }
+      if (browser) {
+        console.log('🌐 Closing browser...');
+        await browser.close();
+      }
     }
   }
 };
 
-// Helper function to get stream links
 async function getStreamLinks(fid) {
+  console.log(`🎯 Getting stream links for file ID: ${fid}`);
   const randomToken = UI_TOKENS[Math.floor(Math.random() * UI_TOKENS.length)];
 
   const playerResponse = await fetch("https://www.febbox.com/console/player", {
@@ -277,6 +375,10 @@ async function getStreamLinks(fid) {
         file: source.file,
         quality: source.label
       }));
+    console.log(`✅ Found ${streamLinks.length} stream links`);
+    console.log('🎥 Stream qualities:', streamLinks.map(link => link.quality).join(', '));
+  } else {
+    console.log('⚠️ No stream sources found in player HTML');
   }
 
   return streamLinks;

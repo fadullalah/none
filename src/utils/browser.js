@@ -17,7 +17,7 @@ const userAgents = [
 ];
 
 export const browserOptions = {
-  headless: 'false',
+  headless: 'new',
   args: [
     '--no-sandbox',
     '--disable-setuid-sandbox',

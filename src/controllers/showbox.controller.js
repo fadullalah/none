@@ -1,6 +1,3 @@
-import puppeteer from 'puppeteer-extra';
-import { browserOptions, createStealthPage } from '../utils/browser.js';
-import { getProxyEnabledBrowserOptions } from '../utils/proxy-integration.js';
 import fetch from 'node-fetch';
 import * as cheerio from 'cheerio';
 
@@ -11,7 +8,6 @@ const UI_TOKENS = [
 async function searchShowboxByTitle(title, type, year) {
   console.log(`🔎 Searching ShowBox for: "${title}" (${year}) [${type}]`);
   const searchUrl = `https://showbox.media/search?keyword=${encodeURIComponent(title)}`;
-  console.log(`📡 Search URL: ${searchUrl}`);
   
   const response = await fetch(searchUrl);
   const html = await response.text();
@@ -23,14 +19,9 @@ async function searchShowboxByTitle(title, type, year) {
     const yearText = $(item).find('.film-year, .year, [class*="year"]').text().trim();
     const yearMatch = yearText.match(/\d{4}/);
     const itemYear = yearMatch ? parseInt(yearMatch[0]) : null;
+    const id = link ? link.split('/detail/')[1] : null;
     
-    console.log(`📺 Found result: "${itemTitle}" (${itemYear || 'Unknown Year'}) - ${link}`);
-    return {
-      title: itemTitle,
-      year: itemYear,
-      link: link,
-      id: link ? link.split('/detail/')[1] : null
-    };
+    return { title: itemTitle, year: itemYear, link, id };
   }).get();
 
   const exactMatch = results.find(result => {
@@ -39,308 +30,20 @@ async function searchShowboxByTitle(title, type, year) {
     return titleMatch && yearMatch;
   });
 
-  if (exactMatch) {
-    console.log(`✅ Found match: ${exactMatch.title} (${exactMatch.year}) - ID: ${exactMatch.id}`);
-  } else {
-    console.log(`❌ No match found for "${title}" (${year})`);
-    console.log('Available results:', JSON.stringify(results, null, 2));
-  }
-
   return exactMatch;
 }
 
-export const showboxController = {
-  async getShowboxUrl(req, res) {
-    const { type, tmdbId } = req.params;
-    const { season, episode } = req.query;
-    let browser = null;
-    let page = null;
-    let targetUrl = '';
-    let tmdbData = null;
-
-    console.log(`\n🎬 Starting ShowBox scrape for TMDB ID: ${tmdbId} [${type}]`);
-    console.log(`📺 Season: ${season}, Episode: ${episode}`);
-
-    try {
-      console.log(`🎯 Fetching TMDB data...`);
-      const tmdbResponse = await fetch(
-        `https://api.themoviedb.org/3/${type}/${tmdbId}?api_key=${process.env.API_TOKEN}`
-      );
-      tmdbData = await tmdbResponse.json();
-      console.log(`📊 TMDB Response:`, {
-        title: tmdbData.title || tmdbData.name,
-        release_date: tmdbData.release_date || tmdbData.first_air_date
-      });
-
-      const title = tmdbData.title || tmdbData.name;
-      const year = new Date(tmdbData.release_date || tmdbData.first_air_date).getFullYear();
-      
-      const formattedTitle = title.toLowerCase()
-        .replace(/[^a-z0-9]+/g, '-')
-        .replace(/-+/g, '-')
-        .replace(/^-|-$/g, '');
-
-      const prefix = type === 'movie' ? 'm-' : 't-';
-      targetUrl = `https://www.showbox.media/${type}/${prefix}${formattedTitle}-${year}`;
-      
-      console.log(`🎯 Initial target URL: ${targetUrl}`);
-      let response = await fetch(targetUrl);
-      console.log(`📊 Initial response status: ${response.status}`);
-      
-      if (!response.ok) {
-        console.log('⚠️ Title-based URL failed, initiating search fallback...');
-        const searchResult = await searchShowboxByTitle(title, type, year);
-        
-        if (searchResult) {
-          targetUrl = `https://www.showbox.media/${type}/detail/${searchResult.id}`;
-          console.log(`🎯 New target URL from search: ${targetUrl}`);
-          response = await fetch(targetUrl);
-          if (!response.ok) {
-            throw new Error('Search result URL not accessible');
-          }
-        } else {
-          throw new Error('Show not found via title or search');
-        }
-      }
-
-      console.log('🌐 Launching browser...');
-      browser = await puppeteer.launch({
-        ...getProxyEnabledBrowserOptions(),
-        headless: false
-      });
-      
-      console.log('📄 Creating new page...');
-      page = await createStealthPage(browser);
-
-      await page.setRequestInterception(true);
-      page.on('request', request => {
-        const resourceType = request.resourceType();
-        if (['media', 'websocket', 'manifest', 'other'].includes(resourceType)) {
-          request.abort();
-        } else {
-          request.continue();
-        }
-      });
-
-      console.log('🚀 Navigating to target URL...');
-      await page.goto(targetUrl, { waitUntil: 'domcontentloaded' });
-
-      const isEpisodeList = await page.evaluate(() => {
-        return !!document.querySelector('.seasons-list-new');
-      });
-      console.log(`📺 Is episode list page: ${isEpisodeList}`);
-
-      if (isEpisodeList) {
-        console.log('🎯 Handling TV show episode...');
-        await page.waitForSelector('.eps-item');
-        const firstEpisode = await page.$('.eps-item');
-        if (!firstEpisode) throw new Error('No episodes found');
-        await firstEpisode.click();
-      } else {
-        console.log('🎯 Handling movie...');
-        const playButton = await page.evaluate(() => {
-          const selectors = [
-            '.play_button',
-            'button.play',
-            '[class*="play"]',
-            'a.btn-play',
-            '.watch-now'
-          ];
-          
-          for (const selector of selectors) {
-            const element = document.querySelector(selector);
-            if (element) return selector;
-          }
-          return null;
-        });
-
-        if (!playButton) throw new Error('Play button not found');
-        console.log(`🎯 Found play button: ${playButton}`);
-        await page.click(playButton);
-      }
-
-      console.log('⏳ Waiting for download app button...');
-      await page.waitForSelector('.download_app', { timeout: 10000 });
-
-      const newPagePromise = new Promise(resolve => {
-        browser.on('targetcreated', async target => {
-          const newPage = await target.page();
-          if (newPage) {
-            await newPage.waitForFunction(() => window.location.href !== 'about:blank');
-            resolve(newPage);
-          }
-        });
-      });
-
-      console.log('🖱️ Clicking download app button...');
-      await page.click('.download_app');
-
-      const newPage = await Promise.race([
-        newPagePromise,
-        new Promise((_, reject) => setTimeout(() => reject(new Error('New page timeout')), 10000))
-      ]);
-
-      const febboxUrl = await newPage.evaluate(() => window.location.href);
-      console.log(`🔗 FebBox URL: ${febboxUrl}`);
-      const shareKey = febboxUrl.split('/share/')[1];
-      
-      const shareInfoUrl = `https://www.febbox.com/file/share_info?key=${shareKey}`;
-      const shareInfoResponse = await fetch(shareInfoUrl);
-      const shareInfoHtml = await shareInfoResponse.text();
-      
-      const $ = cheerio.load(shareInfoHtml);
-
-      if (type === 'tv') {
-        // Find all seasons
-        const seasonDivs = $('.file.open_dir').filter(function() {
-          return $(this).attr('data-path').toLowerCase().includes('season');
-        });
-
-        if (!seasonDivs.length) throw new Error('No seasons found');
-
-        const seasons = [];
-        for (const seasonDiv of seasonDivs) {
-          const seasonPath = $(seasonDiv).attr('data-path');
-          const seasonNum = parseInt(seasonPath.toLowerCase().replace('season', '').trim(), 10);
-          const seasonFid = $(seasonDiv).attr('data-id');
-
-          if (!isNaN(seasonNum)) {
-            seasons.push({ season: seasonNum, folder_id: seasonFid });
-          }
-        }
-
-        // If season and episode are provided, target a specific episode
-        if (season && episode) {
-          const targetSeason = seasons.find(s => s.season === parseInt(season, 10));
-          if (!targetSeason) throw new Error(`Season ${season} not found`);
-
-          const episodeListUrl = `https://www.febbox.com/file/file_share_list?share_key=${shareKey}&parent_id=${targetSeason.folder_id}`;
-          const episodeResponse = await fetch(episodeListUrl);
-          const episodeData = await episodeResponse.json();
-
-          if (!episodeData?.data?.file_list?.length) {
-            throw new Error('No episodes found in season');
-          }
-
-          const targetEpisode = episodeData.data.file_list.find(item => {
-            const fileName = item.file_name.toUpperCase();
-            return fileName.includes(`S${season}E${episode}`) || fileName.includes(`S${String(season).padStart(2, '0')}E${String(episode).padStart(2, '0')}`);
-          });
-
-          if (!targetEpisode) throw new Error(`Episode ${episode} not found in season ${season}`);
-
-          const fid = targetEpisode.fid;
-          const streamLinks = await getStreamLinks(fid);
-
-          res.json({
-            success: true,
-            tmdb_id: tmdbId,
-            type,
-            title,
-            year,
-            showbox_url: targetUrl,
-            febbox_url: febboxUrl,
-            season: parseInt(season, 10),
-            episode: parseInt(episode, 10),
-            stream_links: streamLinks
-          });
-          return;
-        }
-
-        // If no season and episode are provided, list all episodes and seasons
-        const allEpisodes = [];
-        for (const seasonData of seasons) {
-          const episodeListUrl = `https://www.febbox.com/file/file_share_list?share_key=${shareKey}&parent_id=${seasonData.folder_id}`;
-          const episodeResponse = await fetch(episodeListUrl);
-          const episodeData = await episodeResponse.json();
-
-          if (episodeData?.data?.file_list?.length) {
-            for (const item of episodeData.data.file_list) {
-              const fileName = item.file_name.toUpperCase();
-              const episodeMatch = fileName.match(/S(\d+)E(\d+)/);
-              if (episodeMatch) {
-                const episodeNum = parseInt(episodeMatch[2], 10);
-                const streamLinks = await getStreamLinks(item.fid);
-                allEpisodes.push({
-                  season: seasonData.season,
-                  episode: episodeNum,
-                  filename: item.file_name,
-                  streams: streamLinks
-                });
-              }
-            }
-          }
-        }
-
-        // Organize episodes by season
-        const organizedEpisodes = {};
-        for (const episode of allEpisodes) {
-          if (!organizedEpisodes[episode.season]) {
-            organizedEpisodes[episode.season] = [];
-          }
-          organizedEpisodes[episode.season].push(episode);
-        }
-
-        res.json({
-          success: true,
-          tmdb_id: tmdbId,
-          type,
-          title,
-          year,
-          showbox_url: targetUrl,
-          febbox_url: febboxUrl,
-          episodes: organizedEpisodes
-        });
-        return;
-      }
-
-      // Movie logic
-      const firstFile = $('.file').first();
-      const fid = firstFile.attr('data-id');
-      console.log(`🎬 Found movie file ID: ${fid}`);
-      const streamLinks = await getStreamLinks(fid);
-
-      res.json({
-        success: true,
-        tmdb_id: tmdbId,
-        type,
-        title,
-        year,
-        showbox_url: targetUrl,
-        febbox_url: febboxUrl,
-        stream_links: streamLinks
-      });
-
-    } catch (error) {
-      console.error('❌ ShowBox scraping failed:', {
-        error: error.message,
-        stack: error.stack,
-        tmdbId,
-        type,
-        targetUrl,
-        title: tmdbData?.title || tmdbData?.name || 'Unknown',
-        year: tmdbData?.release_date || tmdbData?.first_air_date || 'Unknown'
-      });
-      
-      res.status(500).json({
-        success: false,
-        error: error.message,
-        tmdb_id: tmdbId,
-        type,
-        attempted_url: targetUrl
-      });
-    } finally {
-      if (page) {
-        console.log('📄 Closing page...');
-        await page.close();
-      }
-      if (browser) {
-        console.log('🌐 Closing browser...');
-        await browser.close();
-      }
-    }
+async function getFebboxShareLink(showboxId, type) {
+  const apiUrl = `https://showbox.media/index/share_link?id=${showboxId}&type=${type === 'movie' ? 1 : 2}`;
+  const response = await fetch(apiUrl);
+  const data = await response.json();
+  
+  if (data.code !== 1 || !data.data?.link) {
+    throw new Error('Failed to get FebBox share link');
   }
-};
+  
+  return data.data.link;
+}
 
 async function getStreamLinks(fid) {
   console.log(`🎯 Getting stream links for file ID: ${fid}`);
@@ -352,12 +55,6 @@ async function getStreamLinks(fid) {
       'accept': 'text/plain, */*; q=0.01',
       'content-type': 'application/x-www-form-urlencoded',
       'x-requested-with': 'XMLHttpRequest',
-      'sec-fetch-dest': 'empty',
-      'sec-fetch-mode': 'cors',
-      'sec-fetch-site': 'same-origin',
-      'sec-ch-ua': '"Chromium";v="130"',
-      'sec-ch-ua-mobile': '?0',
-      'sec-ch-ua-platform': '"Windows"',
       'cookie': `ui=${randomToken};`
     },
     body: `fid=${fid}`
@@ -365,21 +62,232 @@ async function getStreamLinks(fid) {
 
   const playerHtml = await playerResponse.text();
   const sourcesMatch = playerHtml.match(/var sources = (\[.*?\]);/s);
-  let streamLinks = [];
   
-  if (sourcesMatch) {
-    const sources = JSON.parse(sourcesMatch[1]);
-    streamLinks = sources
-      .filter(source => source.type === "video/mp4")
-      .map(source => ({
-        file: source.file,
-        quality: source.label
-      }));
-    console.log(`✅ Found ${streamLinks.length} stream links`);
-    console.log('🎥 Stream qualities:', streamLinks.map(link => link.quality).join(', '));
-  } else {
+  if (!sourcesMatch) {
     console.log('⚠️ No stream sources found in player HTML');
+    return [];
   }
 
-  return streamLinks;
+  const sources = JSON.parse(sourcesMatch[1]);
+  return sources
+    .filter(source => source.type === "video/mp4")
+    .map(source => ({
+      file: source.file,
+      quality: source.label
+    }));
 }
+
+async function tryUrlBasedId(title, year, type) {
+  const formattedTitle = title.toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '');
+
+  const prefix = type === 'movie' ? 'm-' : 't-';
+  const url = `https://showbox.media/${type}/${prefix}${formattedTitle}-${year}`;
+  
+  console.log(`🎯 Trying URL-based approach: ${url}`);
+  const response = await fetch(url);
+  
+  if (!response.ok) {
+    console.log('⚠️ URL-based approach failed');
+    return null;
+  }
+
+  const html = await response.text();
+  const $ = cheerio.load(html);
+  
+  // Extract ID from meta tags or other elements
+  const detailUrl = $('link[rel="canonical"]').attr('href') || 
+                   $('.watch-now').attr('href') || 
+                   $('a[href*="/detail/"]').attr('href');
+                   
+  if (detailUrl) {
+    const idMatch = detailUrl.match(/\/detail\/(\d+)/);
+    if (idMatch) {
+      console.log(`✅ Found ID via URL approach: ${idMatch[1]}`);
+      return idMatch[1];
+    }
+  }
+  
+  return null;
+}
+
+export const showboxController = {
+  async getShowboxUrl(req, res) {
+    const { type, tmdbId } = req.params;
+    const { season, episode } = req.query;
+    let showboxId = null;
+    let tmdbData = null;
+
+    console.log(`\n🎬 Starting ShowBox scrape for TMDB ID: ${tmdbId} [${type}]`);
+    
+    try {
+      // Fetch TMDB data
+      const tmdbResponse = await fetch(
+        `https://api.themoviedb.org/3/${type}/${tmdbId}?api_key=${process.env.API_TOKEN}`
+      );
+      tmdbData = await tmdbResponse.json();
+      
+      const title = tmdbData.title || tmdbData.name;
+      const year = new Date(tmdbData.release_date || tmdbData.first_air_date).getFullYear();
+      
+      // Try URL-based approach first
+      showboxId = await tryUrlBasedId(title, year, type);
+      
+      // If URL approach fails, fall back to search
+      if (!showboxId) {
+        console.log('⚠️ Falling back to search method...');
+        const searchResult = await searchShowboxByTitle(title, type, year);
+        if (!searchResult?.id) {
+          throw new Error('Content not found on ShowBox');
+        }
+        showboxId = searchResult.id;
+      }
+
+      // Get FebBox share link directly using ShowBox API
+      const febboxUrl = await getFebboxShareLink(showboxId, type);
+      const shareKey = febboxUrl.split('/share/')[1];
+      
+      // Get file list from FebBox
+      const shareInfoUrl = `https://www.febbox.com/file/share_info?key=${shareKey}`;
+      const shareInfoResponse = await fetch(shareInfoUrl);
+      const shareInfoHtml = await shareInfoResponse.text();
+      const $ = cheerio.load(shareInfoHtml);
+
+      if (type === 'tv') {
+        // Handle TV show logic
+        const seasons = $('.file.open_dir')
+          .filter(function() {
+            return $(this).attr('data-path').toLowerCase().includes('season');
+          })
+          .map((_, div) => ({
+            season: parseInt($(div).attr('data-path').toLowerCase().replace('season', '').trim(), 10),
+            folder_id: $(div).attr('data-id')
+          }))
+          .get()
+          .filter(s => !isNaN(s.season));
+
+        if (!seasons.length) {
+          throw new Error('No seasons found');
+        }
+
+        if (season && episode) {
+          // Get specific episode
+          const targetSeason = seasons.find(s => s.season === parseInt(season, 10));
+          if (!targetSeason) {
+            throw new Error(`Season ${season} not found`);
+          }
+
+          const episodeListUrl = `https://www.febbox.com/file/file_share_list?share_key=${shareKey}&parent_id=${targetSeason.folder_id}`;
+          const episodeResponse = await fetch(episodeListUrl);
+          const episodeData = await episodeResponse.json();
+
+          if (!episodeData?.data?.file_list?.length) {
+            throw new Error('No episodes found in season');
+          }
+
+          const targetEpisode = episodeData.data.file_list.find(item => {
+            const fileName = item.file_name.toUpperCase();
+            const seasonPad = String(season).padStart(2, '0');
+            const episodePad = String(episode).padStart(2, '0');
+            return fileName.includes(`S${season}E${episode}`) || 
+                   fileName.includes(`S${seasonPad}E${episodePad}`);
+          });
+
+          if (!targetEpisode) {
+            throw new Error(`Episode ${episode} not found in season ${season}`);
+          }
+
+          const streamLinks = await getStreamLinks(targetEpisode.fid);
+          return res.json({
+            success: true,
+            tmdb_id: tmdbId,
+            type,
+            title,
+            year,
+            showbox_id: showboxId,
+            febbox_url: febboxUrl,
+            season: parseInt(season, 10),
+            episode: parseInt(episode, 10),
+            stream_links: streamLinks
+          });
+        }
+
+        // Get all episodes
+        const episodes = {};
+        for (const seasonData of seasons) {
+          const episodeListUrl = `https://www.febbox.com/file/file_share_list?share_key=${shareKey}&parent_id=${seasonData.folder_id}`;
+          const episodeResponse = await fetch(episodeListUrl);
+          const episodeData = await episodeResponse.json();
+
+          if (episodeData?.data?.file_list?.length) {
+            episodes[seasonData.season] = await Promise.all(
+              episodeData.data.file_list
+                .filter(item => {
+                  const match = item.file_name.toUpperCase().match(/S(\d+)E(\d+)/);
+                  return match && parseInt(match[1], 10) === seasonData.season;
+                })
+                .map(async item => {
+                  const match = item.file_name.toUpperCase().match(/S(\d+)E(\d+)/);
+                  const streamLinks = await getStreamLinks(item.fid);
+                  return {
+                    season: seasonData.season,
+                    episode: parseInt(match[2], 10),
+                    filename: item.file_name,
+                    streams: streamLinks
+                  };
+                })
+            );
+          }
+        }
+
+        return res.json({
+          success: true,
+          tmdb_id: tmdbId,
+          type,
+          title,
+          year,
+          showbox_id: showboxId,
+          febbox_url: febboxUrl,
+          episodes
+        });
+      }
+
+      // Handle movie logic
+      const firstFile = $('.file').first();
+      const fid = firstFile.attr('data-id');
+      const streamLinks = await getStreamLinks(fid);
+
+      return res.json({
+        success: true,
+        tmdb_id: tmdbId,
+        type,
+        title,
+        year,
+        showbox_id: showboxId,
+        febbox_url: febboxUrl,
+        stream_links: streamLinks
+      });
+
+    } catch (error) {
+      console.error('❌ ShowBox scraping failed:', {
+        error: error.message,
+        stack: error.stack,
+        tmdbId,
+        type,
+        showboxId,
+        title: tmdbData?.title || tmdbData?.name || 'Unknown',
+        year: tmdbData?.release_date || tmdbData?.first_air_date || 'Unknown'
+      });
+      
+      return res.status(500).json({
+        success: false,
+        error: error.message,
+        tmdb_id: tmdbId,
+        type,
+        showbox_id: showboxId
+      });
+    }
+  }
+};

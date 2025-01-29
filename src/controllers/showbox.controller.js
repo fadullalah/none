@@ -128,6 +128,15 @@ export const showboxController = {
         `https://api.themoviedb.org/3/${type}/${tmdbId}?api_key=${process.env.API_TOKEN}`
       );
       tmdbData = await tmdbResponse.json();
+
+      if (!tmdbData || (!tmdbData.title && !tmdbData.name)) {
+        throw new Error('Invalid TMDB data received');
+      }      
+
+      console.log('TMDB Response:', JSON.stringify(tmdbData, null, 2));
+      console.log('TMDB API Response Status:', tmdbResponse.status);
+      console.log('TMDB API Response Headers:', tmdbResponse.headers);
+      console.log('TMDB API Response Body:', tmdbData);      
       
       const title = tmdbData.title || tmdbData.name;
       const year = new Date(tmdbData.release_date || tmdbData.first_air_date).getFullYear();

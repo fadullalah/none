@@ -295,7 +295,14 @@ export const showboxController = {
         error: error.message,
         tmdb_id: tmdbId,
         type,
-        showbox_id: showboxId
+        showbox_id: showbox_id,
+        debug: {
+          tmdbData: tmdbData || 'No TMDB data',
+          title: tmdbData?.title || tmdbData?.name || 'No title found',
+          year: tmdbData?.release_date || tmdbData?.first_air_date || 'No date found',
+          stack: error.stack,
+          fullError: error.toString()
+        }
       });
     }
   }

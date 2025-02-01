@@ -1,13 +1,18 @@
 import fetch from 'node-fetch';
 import * as cheerio from 'cheerio';
 
+const SCRAPER_API_KEY = '169e05c208dcbe5e453edd9c5957cc40';
 const UI_TOKENS = [
   'eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpYXQiOjE3MzE1Mjc1NTIsIm5iZiI6MTczMTUyNzU1MiwiZXhwIjoxNzYyNjMxNTcyLCJkYXRhIjp7InVpZCI6MzYxNTkxLCJ0b2tlbiI6Ijc4NjdlYzc2NzcwODAyNjcxNWNlNTZjMWJiZDI1N2NkIn19.vXKdWeU8R_xe4gUMBg-hIxkftFogPdZEGtXvAw0IC-Q'
 ];
 
+function getScraperUrl(url) {
+    return `http://api.scraperapi.com?api_key=${SCRAPER_API_KEY}&url=${encodeURIComponent(url)}`;
+}
+
 async function searchShowboxByTitle(title, type, year) {
   console.log(`🔎 Searching ShowBox for: "${title}" (${year}) [${type}]`);
-  const searchUrl = `https://showbox.media/search?keyword=${encodeURIComponent(title)}`;
+  const searchUrl = getScraperUrl(`https://showbox.media/search?keyword=${encodeURIComponent(title)}`);
   
   const response = await fetch(searchUrl);
   const html = await response.text();
@@ -34,7 +39,7 @@ async function searchShowboxByTitle(title, type, year) {
 }
 
 async function getFebboxShareLink(showboxId, type) {
-  const apiUrl = `https://showbox.media/index/share_link?id=${showboxId}&type=${type === 'movie' ? 1 : 2}`;
+  const apiUrl = getScraperUrl(`https://showbox.media/index/share_link?id=${showboxId}&type=${type === 'movie' ? 1 : 2}`);
   const response = await fetch(apiUrl);
   const data = await response.json();
   
@@ -52,12 +57,19 @@ async function getStreamLinks(fid) {
   const playerResponse = await fetch("https://www.febbox.com/console/player", {
     method: 'POST',
     headers: {
-      'accept': 'text/plain, */*; q=0.01',
-      'content-type': 'application/x-www-form-urlencoded',
+      'accept': '*/*',
+      'content-type': 'application/x-www-form-urlencoded; charset=UTF-8',
       'x-requested-with': 'XMLHttpRequest',
-      'cookie': `ui=${randomToken};`
+      'cookie': `ui=${randomToken}`,
+      'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      'origin': 'https://www.febbox.com',
+      'referer': 'https://www.febbox.com/file/share'
     },
-    body: `fid=${fid}`
+    body: new URLSearchParams({
+      'fid': fid,
+      'share_key': '',
+      '_token': randomToken
+    }).toString()
   });
 
   const playerHtml = await playerResponse.text();
@@ -84,7 +96,7 @@ async function tryUrlBasedId(title, year, type) {
     .replace(/^-|-$/g, '');
 
   const prefix = type === 'movie' ? 'm-' : 't-';
-  const url = `https://showbox.media/${type}/${prefix}${formattedTitle}-${year}`;
+  const url = getScraperUrl(`https://showbox.media/${type}/${prefix}${formattedTitle}-${year}`);
   
   console.log(`🎯 Trying URL-based approach: ${url}`);
   const response = await fetch(url);
@@ -97,7 +109,6 @@ async function tryUrlBasedId(title, year, type) {
   const html = await response.text();
   const $ = cheerio.load(html);
   
-  // Extract ID from meta tags or other elements
   const detailUrl = $('link[rel="canonical"]').attr('href') || 
                    $('.watch-now').attr('href') || 
                    $('a[href*="/detail/"]').attr('href');
@@ -123,7 +134,6 @@ export const showboxController = {
     console.log(`\n🎬 Starting ShowBox scrape for TMDB ID: ${tmdbId} [${type}]`);
     
     try {
-      // Fetch TMDB data
       const tmdbResponse = await fetch(
         `https://api.themoviedb.org/3/${type}/${tmdbId}?api_key=${process.env.API_TOKEN}`
       );
@@ -132,10 +142,8 @@ export const showboxController = {
       const title = tmdbData.title || tmdbData.name;
       const year = new Date(tmdbData.release_date || tmdbData.first_air_date).getFullYear();
       
-      // Try URL-based approach first
       showboxId = await tryUrlBasedId(title, year, type);
       
-      // If URL approach fails, fall back to search
       if (!showboxId) {
         console.log('⚠️ Falling back to search method...');
         const searchResult = await searchShowboxByTitle(title, type, year);
@@ -145,18 +153,15 @@ export const showboxController = {
         showboxId = searchResult.id;
       }
 
-      // Get FebBox share link directly using ShowBox API
       const febboxUrl = await getFebboxShareLink(showboxId, type);
       const shareKey = febboxUrl.split('/share/')[1];
       
-      // Get file list from FebBox
       const shareInfoUrl = `https://www.febbox.com/file/share_info?key=${shareKey}`;
       const shareInfoResponse = await fetch(shareInfoUrl);
       const shareInfoHtml = await shareInfoResponse.text();
       const $ = cheerio.load(shareInfoHtml);
 
       if (type === 'tv') {
-        // Handle TV show logic
         const seasons = $('.file.open_dir')
           .filter(function() {
             return $(this).attr('data-path').toLowerCase().includes('season');
@@ -173,7 +178,6 @@ export const showboxController = {
         }
 
         if (season && episode) {
-          // Get specific episode
           const targetSeason = seasons.find(s => s.season === parseInt(season, 10));
           if (!targetSeason) {
             throw new Error(`Season ${season} not found`);
@@ -214,7 +218,6 @@ export const showboxController = {
           });
         }
 
-        // Get all episodes
         const episodes = {};
         for (const seasonData of seasons) {
           const episodeListUrl = `https://www.febbox.com/file/file_share_list?share_key=${shareKey}&parent_id=${seasonData.folder_id}`;
@@ -254,7 +257,6 @@ export const showboxController = {
         });
       }
 
-      // Handle movie logic
       const firstFile = $('.file').first();
       const fid = firstFile.attr('data-id');
       const streamLinks = await getStreamLinks(fid);

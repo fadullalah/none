@@ -81,12 +81,11 @@ async function getStreamLinks(fid) {
   }
 
   const sources = JSON.parse(sourcesMatch[1]);
-  return sources
-    .filter(source => source.type === "video/mp4")
-    .map(source => ({
-      file: source.file,
-      quality: source.label
-    }));
+  return sources.map(source => ({
+    file: source.file,
+    quality: source.label,
+    type: source.type
+  }));
 }
 
 async function tryUrlBasedId(title, year, type) {
@@ -124,6 +123,25 @@ async function tryUrlBasedId(title, year, type) {
   return null;
 }
 
+async function fetchFebboxFiles(shareKey) {
+  const randomToken = UI_TOKENS[Math.floor(Math.random() * UI_TOKENS.length)];
+  const fileListUrl = `https://www.febbox.com/file/file_share_list?share_key=${shareKey}&parent_id=0`;
+  
+  const response = await fetch(fileListUrl, {
+    headers: {
+      'cookie': `ui=${randomToken}`,
+      'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    }
+  });
+  const data = await response.json();
+  
+  if (!data?.data?.file_list) {
+    throw new Error('Failed to fetch Febbox files');
+  }
+  
+  return data.data.file_list.filter(file => file.is_dir === 0);
+}
+
 export const showboxController = {
   async getShowboxUrl(req, res) {
     const { type, tmdbId } = req.params;
@@ -156,54 +174,60 @@ export const showboxController = {
       const febboxUrl = await getFebboxShareLink(showboxId, type);
       const shareKey = febboxUrl.split('/share/')[1];
       
-      const shareInfoUrl = `https://www.febbox.com/file/share_info?key=${shareKey}`;
-      const shareInfoResponse = await fetch(shareInfoUrl);
-      const shareInfoHtml = await shareInfoResponse.text();
-      const $ = cheerio.load(shareInfoHtml);
+      const files = await fetchFebboxFiles(shareKey);
+      const videoExtensions = ['mp4', 'mkv', 'avi', 'mov', 'wmv', 'flv', 'webm'];
+      
+      const streamLinks = await Promise.all(files.map(async (file) => {
+        const ext = file.file_name.split('.').pop().toLowerCase();
+        const qualityMatch = file.file_name.match(/(1080p|720p|480p|360p|2160p|4k)/i);
+        const playerSources = await getStreamLinks(file.fid);
+        
+        return {
+          filename: file.file_name,
+          quality: qualityMatch ? qualityMatch[1] : 'Unknown',
+          type: ext,
+          size: file.file_size,
+          player_streams: playerSources,
+          direct_download: `https://www.febbox.com/file/download_share?fid=${file.fid}&share_key=${shareKey}`
+        };
+      }));
 
       if (type === 'tv') {
-        const seasons = $('.file.open_dir')
-          .filter(function() {
-            return $(this).attr('data-path').toLowerCase().includes('season');
-          })
-          .map((_, div) => ({
-            season: parseInt($(div).attr('data-path').toLowerCase().replace('season', '').trim(), 10),
-            folder_id: $(div).attr('data-id')
-          }))
-          .get()
-          .filter(s => !isNaN(s.season));
+        const seasons = {};
+        const seasonFolders = files.filter(file => 
+          file.is_dir === 1 && file.file_name.toLowerCase().includes('season')
+        );
 
-        if (!seasons.length) {
-          throw new Error('No seasons found');
+        for (const seasonFolder of seasonFolders) {
+          const seasonNumber = parseInt(seasonFolder.file_name.match(/\d+/)?.[0] || '0', 10);
+          if (isNaN(seasonNumber)) continue;
+
+          const episodeFiles = await fetchFebboxFiles(shareKey, seasonFolder.fid);
+          seasons[seasonNumber] = await Promise.all(episodeFiles.map(async (episodeFile) => {
+            const ext = episodeFile.file_name.split('.').pop().toLowerCase();
+            const episodeNumber = parseInt(episodeFile.file_name.match(/E(\d+)/i)?.[1] || '0', 10);
+            const qualityMatch = episodeFile.file_name.match(/(1080p|720p|480p|360p|2160p|4k)/i);
+            const playerSources = await getStreamLinks(episodeFile.fid);
+
+            return {
+              episode: episodeNumber,
+              filename: episodeFile.file_name,
+              quality: qualityMatch ? qualityMatch[1] : 'Unknown',
+              type: ext,
+              size: episodeFile.file_size,
+              player_streams: playerSources,
+              direct_download: `https://www.febbox.com/file/download_share?fid=${episodeFile.fid}&share_key=${shareKey}`
+            };
+          }));
         }
 
         if (season && episode) {
-          const targetSeason = seasons.find(s => s.season === parseInt(season, 10));
-          if (!targetSeason) {
-            throw new Error(`Season ${season} not found`);
-          }
-
-          const episodeListUrl = `https://www.febbox.com/file/file_share_list?share_key=${shareKey}&parent_id=${targetSeason.folder_id}`;
-          const episodeResponse = await fetch(episodeListUrl);
-          const episodeData = await episodeResponse.json();
-
-          if (!episodeData?.data?.file_list?.length) {
-            throw new Error('No episodes found in season');
-          }
-
-          const targetEpisode = episodeData.data.file_list.find(item => {
-            const fileName = item.file_name.toUpperCase();
-            const seasonPad = String(season).padStart(2, '0');
-            const episodePad = String(episode).padStart(2, '0');
-            return fileName.includes(`S${season}E${episode}`) || 
-                   fileName.includes(`S${seasonPad}E${episodePad}`);
-          });
-
-          if (!targetEpisode) {
-            throw new Error(`Episode ${episode} not found in season ${season}`);
-          }
-
-          const streamLinks = await getStreamLinks(targetEpisode.fid);
+          const targetSeason = seasons[parseInt(season, 10)];
+          if (!targetSeason) throw new Error('Season not found');
+          
+          const targetEpisode = targetSeason.find(e => e.episode === parseInt(episode, 10));
+          if (!targetEpisode) throw new Error('Episode not found');
+          
           return res.json({
             success: true,
             tmdb_id: tmdbId,
@@ -214,35 +238,8 @@ export const showboxController = {
             febbox_url: febboxUrl,
             season: parseInt(season, 10),
             episode: parseInt(episode, 10),
-            stream_links: streamLinks
+            streams: targetEpisode
           });
-        }
-
-        const episodes = {};
-        for (const seasonData of seasons) {
-          const episodeListUrl = `https://www.febbox.com/file/file_share_list?share_key=${shareKey}&parent_id=${seasonData.folder_id}`;
-          const episodeResponse = await fetch(episodeListUrl);
-          const episodeData = await episodeResponse.json();
-
-          if (episodeData?.data?.file_list?.length) {
-            episodes[seasonData.season] = await Promise.all(
-              episodeData.data.file_list
-                .filter(item => {
-                  const match = item.file_name.toUpperCase().match(/S(\d+)E(\d+)/);
-                  return match && parseInt(match[1], 10) === seasonData.season;
-                })
-                .map(async item => {
-                  const match = item.file_name.toUpperCase().match(/S(\d+)E(\d+)/);
-                  const streamLinks = await getStreamLinks(item.fid);
-                  return {
-                    season: seasonData.season,
-                    episode: parseInt(match[2], 10),
-                    filename: item.file_name,
-                    streams: streamLinks
-                  };
-                })
-            );
-          }
         }
 
         return res.json({
@@ -253,13 +250,9 @@ export const showboxController = {
           year,
           showbox_id: showboxId,
           febbox_url: febboxUrl,
-          episodes
+          seasons
         });
       }
-
-      const firstFile = $('.file').first();
-      const fid = firstFile.attr('data-id');
-      const streamLinks = await getStreamLinks(fid);
 
       return res.json({
         success: true,
@@ -269,7 +262,7 @@ export const showboxController = {
         year,
         showbox_id: showboxId,
         febbox_url: febboxUrl,
-        stream_links: streamLinks
+        streams: streamLinks
       });
 
     } catch (error) {

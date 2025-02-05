@@ -1,13 +1,68 @@
 import fetch from 'node-fetch';
 import * as cheerio from 'cheerio';
+import { spawn } from 'child_process';
+import { promisify } from 'util';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import { dirname } from 'path';
+
+// Get the directory name of the current module
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
 const SCRAPER_API_KEY = '169e05c208dcbe5e453edd9c5957cc40';
 const UI_TOKENS = [
-  'eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpYXQiOjE3MzE1Mjc1NTIsIm5iZiI6MTczMTUyNzU1MiwiZXhwIjoxNzYyNjMxNTcyLCJkYXRhIjp7InVpZCI6MzYxNTkxLCJ0b2tlbiI6Ijc4NjdlYzc2NzcwODAyNjcxNWNlNTZjMWJiZDI1N2NkIn19.vXKdWeU8R_xe4gUMBg-hIxkftFogPdZEGtXvAw0IC-Q'
+  'eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpYXQiOjE3Mzg3MzIzMTgsIm5iZiI6MTczODczMjMxOCwiZXhwIjoxNzY5ODM2MzM4LCJkYXRhIjp7InVpZCI6NDUxMDE1LCJ0b2tlbiI6ImM3MGYwN2JhOGFjMjVlZjJhY2QwMWQ1ZDNlZDJkNTIwIn19.h520AAP9c3jTSvkJXeap1ggVuOiqIKVREgDplm8f4TI'
 ];
 
 function getScraperUrl(url) {
-    return `http://api.scraperapi.com?api_key=${SCRAPER_API_KEY}&url=${encodeURIComponent(url)}`;
+  return `http://api.scraperapi.com?api_key=${SCRAPER_API_KEY}&url=${encodeURIComponent(url)}`;
+}
+
+async function getPythonScrapedLinks(shareUrl, uiToken) {
+  return new Promise((resolve, reject) => {
+    // Construct the absolute path to the Python script
+    const pythonScriptPath = path.join(__dirname, '..', 'scripts', 'showbox.py');
+    console.log('🐍 Python script path:', pythonScriptPath);
+
+    const pythonProcess = spawn('python', [pythonScriptPath, shareUrl, uiToken]);
+    let outputData = '';
+    let errorData = '';
+
+    pythonProcess.stdout.on('data', (data) => {
+      const output = data.toString();
+      console.log('🐍 Python output:', output);
+      outputData += output;
+    });
+
+    pythonProcess.stderr.on('data', (data) => {
+      const error = data.toString();
+      console.error('⚠️ Python stderr:', error);
+      errorData += error;
+    });
+
+    pythonProcess.on('close', (code) => {
+      if (code !== 0) {
+        console.error('❌ Python scraper error:', errorData);
+        reject(new Error(`Python scraper failed: ${errorData}`));
+        return;
+      }
+
+      try {
+        console.log('✅ Python process completed, parsing results...');
+        const results = JSON.parse(outputData);
+        resolve(results);
+      } catch (error) {
+        console.error('❌ Failed to parse Python output:', error);
+        reject(new Error('Failed to parse Python scraper output: ' + error.message));
+      }
+    });
+
+    pythonProcess.on('error', (error) => {
+      console.error('❌ Python process error:', error);
+      reject(new Error('Failed to start Python scraper: ' + error.message));
+    });
+  });
 }
 
 async function searchShowboxByTitle(title, type, year) {
@@ -123,9 +178,9 @@ async function tryUrlBasedId(title, year, type) {
   return null;
 }
 
-async function fetchFebboxFiles(shareKey) {
+async function fetchFebboxFiles(shareKey, parentId = 0) {
   const randomToken = UI_TOKENS[Math.floor(Math.random() * UI_TOKENS.length)];
-  const fileListUrl = `https://www.febbox.com/file/file_share_list?share_key=${shareKey}&parent_id=0`;
+  const fileListUrl = `https://www.febbox.com/file/file_share_list?share_key=${shareKey}&parent_id=${parentId}`;
   
   const response = await fetch(fileListUrl, {
     headers: {
@@ -139,17 +194,18 @@ async function fetchFebboxFiles(shareKey) {
     throw new Error('Failed to fetch Febbox files');
   }
   
-  return data.data.file_list.filter(file => file.is_dir === 0);
+  return data.data.file_list;
 }
 
 export const showboxController = {
   async getShowboxUrl(req, res) {
     const { type, tmdbId } = req.params;
-    const { season, episode } = req.query;
+    const { season, episode, py } = req.query;
     let showboxId = null;
     let tmdbData = null;
+    const usePython = py !== undefined;
 
-    console.log(`\n🎬 Starting ShowBox scrape for TMDB ID: ${tmdbId} [${type}]`);
+    console.log(`\n🎬 Starting ShowBox scrape for TMDB ID: ${tmdbId} [${type}]${usePython ? ' using Python scraper' : ''}`);
     
     try {
       const tmdbResponse = await fetch(
@@ -173,61 +229,102 @@ export const showboxController = {
 
       const febboxUrl = await getFebboxShareLink(showboxId, type);
       const shareKey = febboxUrl.split('/share/')[1];
-      
-      const files = await fetchFebboxFiles(shareKey);
-      const videoExtensions = ['mp4', 'mkv', 'avi', 'mov', 'wmv', 'flv', 'webm'];
-      
-      const streamLinks = await Promise.all(files.map(async (file) => {
-        const ext = file.file_name.split('.').pop().toLowerCase();
-        const qualityMatch = file.file_name.match(/(1080p|720p|480p|360p|2160p|4k)/i);
-        const playerSources = await getStreamLinks(file.fid);
-        
-        return {
-          filename: file.file_name,
-          quality: qualityMatch ? qualityMatch[1] : 'Unknown',
-          type: ext,
-          size: file.file_size,
-          player_streams: playerSources,
-          direct_download: `https://www.febbox.com/file/download_share?fid=${file.fid}&share_key=${shareKey}`
-        };
-      }));
 
-      if (type === 'tv') {
-        const seasons = {};
-        const seasonFolders = files.filter(file => 
-          file.is_dir === 1 && file.file_name.toLowerCase().includes('season')
-        );
+      let streamLinks = [];
+      let useJavaScript = false;
 
-        for (const seasonFolder of seasonFolders) {
-          const seasonNumber = parseInt(seasonFolder.file_name.match(/\d+/)?.[0] || '0', 10);
-          if (isNaN(seasonNumber)) continue;
+      if (usePython) {
+        console.log('🐍 Using Python scraper for:', febboxUrl);
+        try {
+          const randomToken = UI_TOKENS[Math.floor(Math.random() * UI_TOKENS.length)];
+          const pythonResults = await getPythonScrapedLinks(febboxUrl, randomToken);
+          console.log('✅ Python scraper results received');
+          
+          if (!pythonResults || !Array.isArray(pythonResults)) {
+            throw new Error('Invalid Python scraper results');
+          }
 
-          const episodeFiles = await fetchFebboxFiles(shareKey, seasonFolder.fid);
-          seasons[seasonNumber] = await Promise.all(episodeFiles.map(async (episodeFile) => {
-            const ext = episodeFile.file_name.split('.').pop().toLowerCase();
-            const episodeNumber = parseInt(episodeFile.file_name.match(/E(\d+)/i)?.[1] || '0', 10);
-            const qualityMatch = episodeFile.file_name.match(/(1080p|720p|480p|360p|2160p|4k)/i);
-            const playerSources = await getStreamLinks(episodeFile.fid);
-
-            return {
-              episode: episodeNumber,
-              filename: episodeFile.file_name,
-              quality: qualityMatch ? qualityMatch[1] : 'Unknown',
-              type: ext,
-              size: episodeFile.file_size,
-              player_streams: playerSources,
-              direct_download: `https://www.febbox.com/file/download_share?fid=${episodeFile.fid}&share_key=${shareKey}`
-            };
+          streamLinks = pythonResults.map(result => ({
+            filename: result.file_info.name,
+            quality: result.file_info.type,
+            size: result.file_info.size,
+            player_streams: Object.entries(result.quality_urls).map(([quality, url]) => ({
+              file: url,
+              quality,
+              type: 'mp4'
+            }))
           }));
+        } catch (pythonError) {
+          console.error('❌ Python scraper failed:', pythonError);
+          useJavaScript = true;
         }
+      } else {
+        useJavaScript = true;
+      }
 
-        if (season && episode) {
-          const targetSeason = seasons[parseInt(season, 10)];
-          if (!targetSeason) throw new Error('Season not found');
-          
-          const targetEpisode = targetSeason.find(e => e.episode === parseInt(episode, 10));
-          if (!targetEpisode) throw new Error('Episode not found');
-          
+      if (useJavaScript) {
+        console.log('🟨 Using JavaScript scraper');
+        const files = await fetchFebboxFiles(shareKey);
+        
+        if (type === 'tv') {
+          const seasons = {};
+          const seasonFolders = files.filter(file => 
+            file.is_dir === 1 && file.file_name.toLowerCase().includes('season')
+          );
+
+          for (const seasonFolder of seasonFolders) {
+            const seasonNumber = parseInt(seasonFolder.file_name.match(/\d+/)?.[0] || '0', 10);
+            if (isNaN(seasonNumber)) continue;
+
+            const episodeFiles = await fetchFebboxFiles(shareKey, seasonFolder.fid);
+            const seasonEpisodes = await Promise.all(episodeFiles.map(async (episodeFile) => {
+              const ext = episodeFile.file_name.split('.').pop().toLowerCase();
+              const episodeNumber = parseInt(episodeFile.file_name.match(/E(\d+)/i)?.[1] || '0', 10);
+              const qualityMatch = episodeFile.file_name.match(/(1080p|720p|480p|360p|2160p|4k)/i);
+              const playerSources = await getStreamLinks(episodeFile.fid);
+
+              return {
+                episode: episodeNumber,
+                filename: episodeFile.file_name,
+                quality: qualityMatch ? qualityMatch[1] : 'Unknown',
+                type: ext,
+                size: episodeFile.file_size,
+                player_streams: playerSources,
+                direct_download: `https://www.febbox.com/file/download_share?fid=${episodeFile.fid}&share_key=${shareKey}`
+              };
+            }));
+            
+            if (seasonEpisodes.length > 0) {
+              seasons[seasonNumber] = seasonEpisodes;
+            }
+          }
+
+          if (season && episode) {
+            const targetSeason = seasons[parseInt(season, 10)];
+            if (!targetSeason) {
+              throw new Error('Season not found');
+            }
+            
+            const targetEpisode = targetSeason.find(e => e.episode === parseInt(episode, 10));
+            if (!targetEpisode) {
+              throw new Error('Episode not found');
+            }
+            
+            return res.json({
+              success: true,
+              tmdb_id: tmdbId,
+              type,
+              title,
+              year,
+              showbox_id: showboxId,
+              febbox_url: febboxUrl,
+              season: parseInt(season, 10),
+              episode: parseInt(episode, 10),
+              streams: targetEpisode,
+              scraper: 'javascript'
+            });
+          }
+
           return res.json({
             success: true,
             tmdb_id: tmdbId,
@@ -236,10 +333,41 @@ export const showboxController = {
             year,
             showbox_id: showboxId,
             febbox_url: febboxUrl,
-            season: parseInt(season, 10),
-            episode: parseInt(episode, 10),
-            streams: targetEpisode
+            seasons,
+            scraper: 'javascript'
           });
+        } else {
+          // Handle movies
+          const videoFiles = files.filter(file => file.is_dir === 0);
+          streamLinks = await Promise.all(videoFiles.map(async (file) => {
+            const ext = file.file_name.split('.').pop().toLowerCase();
+            const qualityMatch = file.file_name.match(/(1080p|720p|480p|360p|2160p|4k)/i);
+            const playerSources = await getStreamLinks(file.fid);
+            
+            return {
+              filename: file.file_name,
+              quality: qualityMatch ? qualityMatch[1] : 'Unknown',
+              type: ext,
+              size: file.file_size,
+              player_streams: playerSources,
+              direct_download: `https://www.febbox.com/file/download_share?fid=${file.fid}&share_key=${shareKey}`
+            };
+          }));
+        }
+      }
+
+      // Return results
+      if (type === 'tv' && season && episode && streamLinks.length > 0) {
+        const targetEpisode = streamLinks.find(link => {
+          const seasonMatch = link.filename.match(/S(\d+)/i);
+          const episodeMatch = link.filename.match(/E(\d+)/i);
+          return seasonMatch && episodeMatch && 
+                 parseInt(seasonMatch[1]) === parseInt(season) &&
+                 parseInt(episodeMatch[1]) === parseInt(episode);
+        });
+
+        if (!targetEpisode) {
+          throw new Error('Episode not found');
         }
 
         return res.json({
@@ -250,7 +378,10 @@ export const showboxController = {
           year,
           showbox_id: showboxId,
           febbox_url: febboxUrl,
-          seasons
+          season: parseInt(season),
+          episode: parseInt(episode),
+          streams: targetEpisode,
+          scraper: usePython ? 'python' : 'javascript'
         });
       }
 
@@ -262,7 +393,8 @@ export const showboxController = {
         year,
         showbox_id: showboxId,
         febbox_url: febboxUrl,
-        streams: streamLinks
+        streams: streamLinks,
+        scraper: usePython ? 'python' : 'javascript'
       });
 
     } catch (error) {
@@ -273,7 +405,8 @@ export const showboxController = {
         type,
         showboxId,
         title: tmdbData?.title || tmdbData?.name || 'Unknown',
-        year: tmdbData?.release_date || tmdbData?.first_air_date || 'Unknown'
+        year: tmdbData?.release_date || tmdbData?.first_air_date || 'Unknown',
+        scraper: usePython ? 'python' : 'javascript'
       });
       
       return res.status(500).json({
@@ -281,7 +414,8 @@ export const showboxController = {
         error: error.message,
         tmdb_id: tmdbId,
         type,
-        showbox_id: showboxId
+        showbox_id: showboxId,
+        scraper: usePython ? 'python' : 'javascript'
       });
     }
   }

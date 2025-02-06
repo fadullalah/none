@@ -14,7 +14,18 @@ const PORT = process.env.PORT || 3001;
 
 // Middleware - Allow all CORS
 app.use(cors({
-  origin: '*',
+  origin: [
+    'http://localhost:3000',
+    'https://nunflix-firebase.firebaseapp.com',
+    'https://nunflix-firebase.web.app', 
+    'https://nunflix.com',
+    'https://new-test-player-nunflix.vercel.app',
+    'https://nunflix.org',
+    'https://nunflix.vercel.app',
+    'https://nunflix.app',
+    'https://nunflix-ey9.pages.dev',
+    'https://com.nunflix.app'
+  ],
   methods: ['GET', 'POST', 'OPTIONS'],
   allowedHeaders: '*'
 }));

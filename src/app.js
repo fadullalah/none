@@ -16,6 +16,7 @@ const PORT = process.env.PORT || 3001;
 app.use(cors({
   origin: [
     'http://localhost:3000',
+    'http://localhost:5173',
     'https://nunflix-firebase.firebaseapp.com',
     'https://nunflix-firebase.web.app', 
     'https://nunflix.com',

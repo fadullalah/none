@@ -9,6 +9,7 @@ import { scraperController } from '../controllers/scraper.controller.js';
 import { seriesScraperController } from '../controllers/series.scraper.controller.js';
 import { parentalRatingController } from '../controllers/parental.rating.controller.js';
 import { showboxController } from '../controllers/showbox.controller.js';
+import { playerScraperController } from '../controllers/player.scraper.controller.js';
 
 const router = express.Router();
 
@@ -28,4 +29,8 @@ router.get('/showbox/:type/:tmdbId', showboxController.getShowboxUrl);
 
 // New quality route
 router.get('/quality', qualityController.getQualityInfo);
+
+// New player scraper route - fixed binding issue
+router.get('/extract-video', (req, res) => playerScraperController.extractVideoUrl(req, res));
+
 export default router;

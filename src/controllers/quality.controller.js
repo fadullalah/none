@@ -139,6 +139,105 @@ async function fetchFromWorker(worker, imdbIds) {
     }
 }
 
+// Direct implementation of quality detection logic as fallback
+async function fetchQualityInfoDirect(imdbId) {
+    try {
+        const url = `https://torrentio.strem.fun/stream/movie/${imdbId}.json`;
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 5000); // 5 second timeout
+
+        const response = await withProxy(config => 
+            fetch(url, { 
+                ...config,
+                signal: controller.signal 
+            })
+        );
+        clearTimeout(timeoutId);
+
+        if (!response.ok) {
+            throw new Error(`Torrentio API error: ${response.status} ${response.statusText}`);
+        }
+
+        const data = await response.json();
+        if (!data.streams) {
+            return { qualities: [], mostCommon: null, bestQuality: null, allQualities: [] };
+        }
+
+        const qualityCounts = {};
+        const allQualities = [];
+        data.streams.forEach(stream => {
+            const quality = extractQualityType(stream.name);
+            qualityCounts[quality] = (qualityCounts[quality] || 0) + 1;
+            allQualities.push({ quality, name: stream.name });
+        });
+
+        const qualities = Object.keys(qualityCounts).sort((a, b) => qualityCounts[b] - qualityCounts[a]);
+        const mostCommon = qualities[0];
+        const bestQuality = determineBestQuality(qualities);
+
+        return { qualities, mostCommon, bestQuality, allQualities };
+    } catch (error) {
+        if (error.name === 'AbortError') {
+            console.error(`Torrentio API request timed out for IMDB ID ${imdbId}`);
+            return { error: 'Request timed out' };
+        }
+        console.error(`Error fetching quality info for IMDB ID ${imdbId}:`, error);
+        return { error: error.message };
+    }
+}
+
+function extractQualityType(qualityString) {
+    const upperCaseString = qualityString.toUpperCase();
+   
+    if (upperCaseString.includes('2160P') || upperCaseString.includes('4K') || upperCaseString.includes('UHD')) {
+        return '4K';
+    } else if (upperCaseString.includes('1080P') || upperCaseString.includes('FULLHD')) {
+        return '1080p';
+    } else if (upperCaseString.includes('720P') || upperCaseString.includes('HD')) {
+        return '720p';
+    } else if (upperCaseString.includes('480P') || upperCaseString.includes('SD')) {
+        return '480p';
+    } else if (upperCaseString.includes('CAM') || upperCaseString.includes('TS') || upperCaseString.includes('TELESYNC')) {
+        return 'CAM';
+    } else if (upperCaseString.includes('BLURAY') || upperCaseString.includes('BLU-RAY') || upperCaseString.includes('BRRIP')) {
+        return 'BluRay';
+    } else if (upperCaseString.includes('WEBDL') || upperCaseString.includes('WEB-DL') || upperCaseString.includes('WEB')) {
+        return 'WebDL';
+    } else if (upperCaseString.includes('DVDRIP') || upperCaseString.includes('DVD')) {
+        return 'DVD';
+    } else if (upperCaseString.includes('HDTV')) {
+        return 'HDTV';
+    } else if (upperCaseString.includes('PDTV')) {
+        return 'PDTV';
+    } else {
+        return 'Other';
+    }
+}
+
+function determineBestQuality(qualities) {
+    const qualityOrder = ['4K', '1080p', '720p', '480p', 'BluRay', 'WebDL', 'HDTV', 'DVD', 'PDTV', 'CAM', 'Other'];
+    for (let quality of qualityOrder) {
+        if (qualities.includes(quality)) {
+            return quality;
+        }
+    }
+    return qualities[0] || null;
+}
+
+// Check if worker response indicates a limit error
+function isLimitError(data) {
+    if (!data) return false;
+    
+    // Check if any of the entries have a limit error
+    return Object.values(data).some(item => 
+        item && item.error && (
+            item.error.includes('limit exceeded') || 
+            item.error.includes('KV get() limit') ||
+            item.error.includes('rate limit')
+        )
+    );
+}
+
 export const qualityController = {
     async getQualityInfo(req, res) {
         const { imdb_ids, tmdb_ids } = req.query;
@@ -193,13 +292,44 @@ export const qualityController = {
                 
                 const workerResults = await fetchFromWorker(worker, uncachedIds);
                 
-                if (workerResults) {
+                // Check if we hit a limit error
+                if (workerResults && isLimitError(workerResults)) {
+                    console.log('Worker limit exceeded, falling back to direct implementation');
+                    
+                    // Use direct implementation for each ID
+                    for (const id of uncachedIds) {
+                        console.log(`Fetching directly for ID: ${id}`);
+                        const directResult = await fetchQualityInfoDirect(id);
+                        if (!directResult.error) {
+                            results[id] = directResult;
+                            cache.set(`imdb-${id}`, directResult);
+                        } else {
+                            results[id] = { error: directResult.error };
+                        }
+                    }
+                } else if (workerResults) {
+                    // Process normal worker results
                     Object.entries(workerResults).forEach(([id, data]) => {
                         if (!data.error) {
                             results[id] = data;
                             cache.set(`imdb-${id}`, data);
+                        } else {
+                            results[id] = data;
                         }
                     });
+                } else {
+                    // Worker completely failed, use direct implementation
+                    console.log('Worker failed, falling back to direct implementation');
+                    for (const id of uncachedIds) {
+                        console.log(`Fetching directly for ID: ${id}`);
+                        const directResult = await fetchQualityInfoDirect(id);
+                        if (!directResult.error) {
+                            results[id] = directResult;
+                            cache.set(`imdb-${id}`, directResult);
+                        } else {
+                            results[id] = { error: directResult.error };
+                        }
+                    }
                 }
             }
 

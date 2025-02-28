@@ -2,166 +2,94 @@
 import proxyManager from './proxy-manager.js';
 import { browserOptions } from './browser.js';
 
-// Maximum number of proxy attempts before giving up
-const MAX_PROXY_ATTEMPTS = 5;
-
-export async function getProxyEnabledBrowserOptions() {
-    try {
-        // Try to find a working proxy specifically for browser usage
-        const proxy = await findWorkingBrowserProxy();
-        
-        return {
-            ...browserOptions,
-            args: [
-                ...browserOptions.args,
-                ...proxyManager.getPuppeteerArgs(proxy)
-            ]
-        };
-    } catch (error) {
-        console.warn(`⚠️ Could not find working proxy for browser: ${error.message}`);
-        console.warn('⚠️ Proceeding without proxy...');
-        
-        // Return browser options without proxy if no working proxy found
-        return browserOptions;
-    }
-}
-
-export async function withProxy(fetchFn, attemptCount = 0) {
-    // If we've tried too many times, throw a more descriptive error
-    if (attemptCount >= MAX_PROXY_ATTEMPTS) {
-        throw new Error(`Failed after ${MAX_PROXY_ATTEMPTS} proxy attempts. Consider checking proxy list validity.`);
-    }
-
+export function getProxyEnabledBrowserOptions() {
     const proxy = proxyManager.getNextProxy();
-    console.log(`🌐 Using proxy: ${proxy.protocol}://${proxy.host}:${proxy.port}`);
+    return {
+        ...browserOptions,
+        args: [
+            ...browserOptions.args,
+            ...(proxy ? proxyManager.getPuppeteerArgs(proxy) : [])
+        ],
+        // Increase timeout for browser operations
+        timeout: 30000
+    };
+}
+
+export async function withProxy(fetchFn, config = {}) {
+    // Try up to 3 different proxies before giving up
+    const maxRetries = 3;
+    let lastError = null;
+    let attemptedProxies = new Set();
     
-    try {
-        const result = await fetchFn(proxyManager.getFetchConfig(proxy));
-        console.log(`✅ Proxy request successful: ${proxy.host}`);
-        proxyManager.markProxySuccess(proxy);
-        return result;
-    } catch (error) {
-        console.log(`❌ Proxy request failed: ${proxy.host} - ${error.message || 'Unknown error'}`);
-        proxyManager.markProxyFailure(proxy);
-        
-        // For connection errors, try another proxy automatically
-        if (error.message && (
-            error.message.includes('ECONNREFUSED') || 
-            error.message.includes('ETIMEDOUT') || 
-            error.message.includes('ERR_TUNNEL_CONNECTION_FAILED') ||
-            error.message.includes('socket hang up')
-        )) {
-            console.log(`🔄 Automatically retrying with a different proxy (attempt ${attemptCount + 1}/${MAX_PROXY_ATTEMPTS})...`);
-            return withProxy(fetchFn, attemptCount + 1);
-        }
-        
-        throw error;
-    }
-}
-
-// Updated function to test proxies before using them
-export async function testProxy(proxy) {
-    try {
-        console.log(`🧪 Testing proxy ${proxy.host}:${proxy.port} against httpbin.org...`);
-        
-        // Use node-fetch or similar for direct HTTP requests
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
-        
-        // Use HTTP endpoint for testing, not HTTPS
-        const response = await fetch('http://httpbin.org/ip', {
-            signal: controller.signal,
-            ...proxyManager.getFetchConfig(proxy)
-        });
-        
-        clearTimeout(timeoutId);
-        
-        if (response.ok) {
-            const data = await response.json();
-            console.log(`✅ Proxy test successful: ${proxy.host} (IP: ${data.origin})`);
-            return true;
-        }
-        
-        console.log(`❌ Proxy test failed: ${proxy.host} (Status: ${response.status})`);
-        return false;
-    } catch (error) {
-        console.log(`❌ Proxy test error: ${proxy.host} - ${error.message}`);
-        return false;
-    }
-}
-
-// New function to find a working proxy
-export async function findWorkingProxy(maxAttempts = 10) {
-    for (let i = 0; i < maxAttempts; i++) {
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
         const proxy = proxyManager.getNextProxy();
-        console.log(`🔍 Testing proxy: ${proxy.protocol}://${proxy.host}:${proxy.port}`);
         
-        const isWorking = await testProxy(proxy);
+        // If we've already tried this proxy or no proxy is available, skip
+        if (!proxy || attemptedProxies.has(`${proxy.host}:${proxy.port}`)) {
+            if (attempt === 0) {
+                console.log('⚠️ No suitable proxy available, proceeding without proxy');
+                try {
+                    return await fetchFn(config);
+                } catch (error) {
+                    lastError = error;
+                    console.log(`❌ Direct request failed: ${error.message}`);
+                    continue; // Try with a proxy on next attempt
+                }
+            }
+            continue; // Try to get a different proxy
+        }
         
-        if (isWorking) {
-            console.log(`✅ Found working proxy: ${proxy.protocol}://${proxy.host}:${proxy.port}`);
-            return proxy;
-        } else {
-            console.log(`❌ Proxy test failed: ${proxy.host}`);
+        // Track this proxy so we don't use it again in this request
+        attemptedProxies.add(`${proxy.host}:${proxy.port}`);
+        
+        console.log(`🌐 [Attempt ${attempt + 1}/${maxRetries}] Using proxy: ${proxy.protocol}://${proxy.host}:${proxy.port}`);
+        
+        try {
+            // Merge any provided config with the proxy config
+            const mergedConfig = { 
+                ...config, 
+                ...proxyManager.getFetchConfig(proxy),
+                // Ensure we have a reasonable timeout
+                timeout: config.timeout || 20000 // Increased timeout
+            };
+            
+            const result = await fetchFn(mergedConfig);
+            console.log(`✅ Proxy request successful: ${proxy.host}`);
+            proxyManager.markProxySuccess(proxy);
+            return result;
+        } catch (error) {
+            lastError = error;
+            console.log(`❌ Proxy request failed: ${proxy.host} - ${error.message}`);
             proxyManager.markProxyFailure(proxy);
+            
+            // If it's a timeout error, we'll try another proxy
+            if (error.message.includes('timeout') || 
+                error.message.includes('socket hang up') ||
+                error.message.includes('ECONNRESET') ||
+                error.message.includes('ETIMEDOUT')) {
+                console.log('Timeout detected, will try another proxy');
+                continue;
+            }
+            
+            // For navigation errors in Puppeteer, try another proxy
+            if (error.message.includes('Navigation timeout') ||
+                error.message.includes('net::ERR_') ||
+                error.message.includes('Target closed') ||
+                error.message.includes('Session closed')) {
+                console.log('Navigation or session error detected, will try another proxy');
+                continue;
+            }
+            
+            // For other errors, if we have more retries, continue
+            if (attempt < maxRetries - 1) {
+                continue;
+            }
+            
+            // Otherwise, throw the error
+            throw error;
         }
     }
     
-    throw new Error(`Could not find a working proxy after ${maxAttempts} attempts`);
-}
-
-// New function to test proxies specifically for browser usage
-export async function testProxyWithBrowser(proxy) {
-    const puppeteer = await import('puppeteer');
-    
-    try {
-        console.log(`🧪 Testing browser proxy ${proxy.host}:${proxy.port}...`);
-        
-        const browser = await puppeteer.launch({
-            headless: 'new',
-            args: [
-                ...proxyManager.getPuppeteerArgs(proxy),
-                '--no-sandbox',
-                '--disable-setuid-sandbox'
-            ],
-            timeout: 30000
-        });
-        
-        const page = await browser.newPage();
-        await page.goto('http://httpbin.org/ip', { timeout: 15000 });
-        
-        const content = await page.content();
-        await browser.close();
-        
-        if (content.includes(proxy.host)) {
-            console.log(`✅ Browser proxy test successful: ${proxy.host}`);
-            return true;
-        } else {
-            console.log(`❌ Browser proxy test failed: ${proxy.host} (IP not found in response)`);
-            return false;
-        }
-    } catch (error) {
-        console.log(`❌ Browser proxy test error: ${proxy.host} - ${error.message}`);
-        return false;
-    }
-}
-
-// Improved function to find a working proxy for browser usage
-export async function findWorkingBrowserProxy(maxAttempts = 5) {
-    for (let i = 0; i < maxAttempts; i++) {
-        const proxy = proxyManager.getNextProxy();
-        console.log(`🔍 Testing browser proxy: ${proxy.protocol}://${proxy.host}:${proxy.port}`);
-        
-        const isWorking = await testProxyWithBrowser(proxy);
-        
-        if (isWorking) {
-            console.log(`✅ Found working browser proxy: ${proxy.protocol}://${proxy.host}:${proxy.port}`);
-            return proxy;
-        } else {
-            console.log(`❌ Browser proxy test failed: ${proxy.host}`);
-            proxyManager.markProxyFailure(proxy);
-        }
-    }
-    
-    throw new Error(`Could not find a working browser proxy after ${maxAttempts} attempts`);
+    // If we've exhausted all retries, throw the last error
+    throw lastError || new Error('Failed after multiple proxy attempts');
 }

@@ -2,25 +2,75 @@
 import _ from 'lodash';
 import { HttpProxyAgent } from 'http-proxy-agent';
 import { SocksProxyAgent } from 'socks-proxy-agent';
-import axios from 'axios';
 
 class ProxyManager {
     constructor() {
-        // Initialize with empty proxy list - will be populated automatically
-        this.proxies = [];
+        // Initialize proxy list with the provided proxies
+        this.proxies = [
+            { host: '62.182.83.214', port: 1080, protocol: 'socks5' },
+            { host: '132.148.167.243', port: 44728, protocol: 'socks5' },
+            { host: '132.148.167.243', port: 46609, protocol: 'socks5' },
+            { host: '132.148.167.243', port: 44585, protocol: 'socks5' },
+            { host: '98.8.195.160', port: 443, protocol: 'http' },
+            { host: '132.148.167.243', port: 16444, protocol: 'socks5' },
+            { host: '132.148.167.243', port: 18975, protocol: 'socks5' },
+            { host: '64.202.184.249', port: 6282, protocol: 'socks5' },
+            { host: '64.202.184.249', port: 7652, protocol: 'socks5' },
+            { host: '132.148.167.243', port: 62859, protocol: 'socks5' },
+            { host: '132.148.167.243', port: 48451, protocol: 'socks5' },
+            { host: '64.202.184.249', port: 31239, protocol: 'socks5' },
+            { host: '132.148.167.243', port: 46843, protocol: 'socks5' },
+            { host: '5.78.124.10', port: 7654, protocol: 'socks5' },
+            { host: '132.148.167.243', port: 30241, protocol: 'socks5' },
+            { host: '132.148.167.243', port: 28382, protocol: 'socks5' },
+            { host: '132.148.167.243', port: 57413, protocol: 'socks5' },
+            { host: '51.83.66.117', port: 36798, protocol: 'socks5' },
+            { host: '98.152.200.61', port: 8081, protocol: 'socks5' },
+            { host: '132.148.167.243', port: 40303, protocol: 'socks5' },
+            { host: '132.148.167.243', port: 53911, protocol: 'socks5' },
+            { host: '132.148.167.243', port: 30510, protocol: 'socks5' },
+            { host: '132.148.167.243', port: 44945, protocol: 'socks5' },
+            { host: '87.107.69.5', port: 9999, protocol: 'http' },
+            { host: '132.148.167.243', port: 44970, protocol: 'socks5' },
+            { host: '130.162.180.254', port: 8888, protocol: 'http' },
+            { host: '200.174.198.86', port: 8888, protocol: 'http' },
+            { host: '36.103.179.194', port: 8088, protocol: 'http' },
+            { host: '45.77.168.215', port: 45613, protocol: 'http' },
+            { host: '50.63.12.101', port: 59998, protocol: 'socks5' },
+            { host: '184.168.121.153', port: 64744, protocol: 'socks5' },
+            { host: '184.168.121.153', port: 48636, protocol: 'socks5' },
+            { host: '184.168.121.153', port: 29660, protocol: 'socks5' },
+            { host: '184.168.121.153', port: 47137, protocol: 'socks5' },
+            { host: '184.168.121.153', port: 17249, protocol: 'socks5' },
+            { host: '184.168.121.153', port: 8538, protocol: 'socks5' },
+            { host: '184.168.121.153', port: 49562, protocol: 'socks5' },
+            { host: '67.43.227.226', port: 26557, protocol: 'http' },
+            { host: '67.43.227.226', port: 23939, protocol: 'http' },
+            { host: '184.168.121.153', port: 62648, protocol: 'socks5' },
+            { host: '135.148.32.193', port: 58359, protocol: 'socks5' },
+            { host: '184.170.245.134', port: 54968, protocol: 'socks5' },
+            { host: '50.63.12.101', port: 54885, protocol: 'socks5' },
+            { host: '208.89.96.187', port: 33139, protocol: 'socks5' },
+            { host: '72.10.164.178', port: 19155, protocol: 'http' },
+            { host: '68.178.203.148', port: 39041, protocol: 'socks5' },
+            { host: '162.241.73.195', port: 45130, protocol: 'socks5' },
+            { host: '208.89.96.187', port: 36575, protocol: 'socks5' },
+            { host: '184.168.121.153', port: 14013, protocol: 'socks5' },
+            { host: '27.79.140.38', port: 16000, protocol: 'http' }
+        ];        
+
         this.currentIndex = 0;
         this.lastRotation = Date.now();
         this.proxyHealth = new Map();
-        this.lastProxyUpdate = 0;
-        this.proxyUpdateInterval = 30 * 60 * 1000; // 30 minutes
-        this.isUpdatingProxies = false;
-        this.proxyTestUrl = 'https://www.google.com';
-        this.proxyTestTimeout = 3000; // 3 seconds
         
-        // Fetch proxies on initialization
-        this.updateProxyList().catch(err => 
-            console.log(`Initial proxy update error: ${err.message}`)
-        );
+        // Initialize health status for all proxies
+        this.proxies.forEach(proxy => {
+            this.proxyHealth.set(`${proxy.host}:${proxy.port}`, {
+                failures: 0,
+                lastUsed: null,
+                blacklistedUntil: null
+            });
+        });
     }
 
     getProxyString(proxy) {
@@ -28,266 +78,60 @@ class ProxyManager {
     }
 
     markProxyFailure(proxy) {
-        if (!proxy) return;
-        
         const key = `${proxy.host}:${proxy.port}`;
-        const health = this.proxyHealth.get(key) || { failures: 0, lastUsed: null, blacklistedUntil: null };
+        const health = this.proxyHealth.get(key);
         health.failures += 1;
         
-        if (health.failures >= 2) { // Reduced threshold to 2 failures
-            // Blacklist proxy for 10 minutes after 2 failures
-            health.blacklistedUntil = Date.now() + 10 * 60 * 1000;
+        if (health.failures >= 3) {
+            // Blacklist proxy for 5 minutes after 3 failures
+            health.blacklistedUntil = Date.now() + 5 * 60 * 1000;
             health.failures = 0;
-            console.log(`🚫 Blacklisting proxy ${proxy.host}:${proxy.port} for 10 minutes`);
         }
         
         this.proxyHealth.set(key, health);
     }
 
     markProxySuccess(proxy) {
-        if (!proxy) return;
-        
         const key = `${proxy.host}:${proxy.port}`;
-        const health = this.proxyHealth.get(key) || { failures: 0, lastUsed: null, blacklistedUntil: null };
+        const health = this.proxyHealth.get(key);
         health.failures = 0;
-        health.successCount = (health.successCount || 0) + 1;
         this.proxyHealth.set(key, health);
-    }
-
-    /**
-     * Test if a proxy is working
-     * @param {Object} proxy - Proxy object with host, port, and protocol
-     * @returns {Promise<boolean>} - Whether the proxy is working
-     */
-    async testProxy(proxy) {
-        try {
-            const proxyUrl = this.getProxyString(proxy);
-            const agent = proxy.protocol === 'http' 
-                ? new HttpProxyAgent(proxyUrl)
-                : new SocksProxyAgent(proxyUrl);
-                
-            const response = await axios.get(this.proxyTestUrl, {
-                httpsAgent: agent,
-                timeout: this.proxyTestTimeout,
-                proxy: false,
-                validateStatus: () => true // Accept any status code
-            });
-            
-            // Only consider it working if we get a 200 status code
-            return response.status === 200;
-        } catch (error) {
-            return false; // Proxy doesn't work
-        }
-    }
-
-    /**
-     * Fetch proxies from multiple sources
-     */
-    async updateProxyList() {
-        const now = Date.now();
-        
-        // Skip if already updating or if the cache isn't expired
-        if (this.isUpdatingProxies || 
-            (now - this.lastProxyUpdate < this.proxyUpdateInterval && this.proxies.length > 5)) {
-            return;
-        }
-        
-        this.isUpdatingProxies = true;
-        console.log('🔄 Updating proxy list...');
-        
-        try {
-            // Use multiple reliable proxy sources
-            const sources = [
-                { url: 'https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt', protocol: 'http' },
-                { url: 'https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/http.txt', protocol: 'http' },
-                { url: 'https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/https.txt', protocol: 'http' },
-                { url: 'https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/socks4.txt', protocol: 'socks4' },
-                { url: 'https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/socks5.txt', protocol: 'socks5' },
-                { url: 'https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt', protocol: 'http' },
-                { url: 'https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks4.txt', protocol: 'socks4' },
-                { url: 'https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5.txt', protocol: 'socks5' },
-                { url: 'https://raw.githubusercontent.com/hookzof/socks5_list/master/proxy.txt', protocol: 'socks5' },
-                { url: 'https://raw.githubusercontent.com/clarketm/proxy-list/master/proxy-list-raw.txt', protocol: 'http' }
-            ];
-
-            const newProxies = [];
-            for (const source of sources) {
-                try {
-                    const response = await axios.get(source.url, { timeout: 5000 });
-                    const text = response.data;
-                    
-                    // Extract proxies using regex
-                    const matches = text.match(/\d+\.\d+\.\d+\.\d+:\d+/g);
-                    if (matches) {
-                        const sourceProxies = matches.map(match => {
-                            const [host, port] = match.split(':');
-                            return { host, port: parseInt(port), protocol: source.protocol };
-                        });
-                        
-                        newProxies.push(...sourceProxies);
-                    }
-                } catch (error) {
-                    console.warn(`Failed to fetch proxies from ${source.url}: ${error.message}`);
-                }
-            }
-
-            if (newProxies.length > 0) {
-                console.log(`Found ${newProxies.length} proxies, will test a sample...`);
-                
-                // Test more proxies for better reliability
-                const maxProxiesToTest = 30; // Increased from 15
-                const proxiesToTest = newProxies
-                    .sort(() => 0.5 - Math.random()) // Shuffle array
-                    .slice(0, maxProxiesToTest);
-                
-                // Test proxies in parallel with short timeout
-                const testPromises = proxiesToTest.map(proxy => {
-                    return Promise.race([
-                        this.testProxy(proxy).then(works => ({ proxy, works })),
-                        new Promise(resolve => setTimeout(() => resolve({ proxy, works: false }), 2500))
-                    ]);
-                });
-                
-                const results = await Promise.all(testPromises);
-                const workingProxies = results
-                    .filter(result => result.works)
-                    .map(result => result.proxy);
-                
-                console.log(`Found ${workingProxies.length} working proxies out of ${proxiesToTest.length} tested`);
-                
-                // Add working proxies to our list
-                if (workingProxies.length > 0) {
-                    // Initialize health status for new proxies
-                    workingProxies.forEach(proxy => {
-                        const key = `${proxy.host}:${proxy.port}`;
-                        if (!this.proxyHealth.has(key)) {
-                            this.proxyHealth.set(key, {
-                                failures: 0,
-                                lastUsed: null,
-                                blacklistedUntil: null,
-                                successCount: 0
-                            });
-                        }
-                    });
-                    
-                    // Replace the proxy list with working proxies
-                    this.proxies = workingProxies;
-                    this.lastProxyUpdate = now;
-                    
-                    // Reset the current index
-                    this.currentIndex = 0;
-                } else if (this.proxies.length === 0) {
-                    // If we didn't find any working proxies and don't have any, try a few untested ones
-                    console.log("No working proxies found in test sample, using untested proxies as fallback");
-                    const untested = newProxies
-                        .sort(() => 0.5 - Math.random()) // Shuffle
-                        .slice(0, 10); // Take 10 random proxies
-                    
-                    // Initialize health status for untested proxies
-                    untested.forEach(proxy => {
-                        const key = `${proxy.host}:${proxy.port}`;
-                        this.proxyHealth.set(key, {
-                            failures: 0,
-                            lastUsed: null,
-                            blacklistedUntil: null,
-                            successCount: 0
-                        });
-                    });
-                    
-                    this.proxies = untested;
-                }
-            } else {
-                console.warn('No proxies found from any source');
-            }
-        } catch (error) {
-            console.error(`Error updating proxy list: ${error.message}`);
-        } finally {
-            this.isUpdatingProxies = false;
-        }
     }
 
     getNextProxy() {
         const now = Date.now();
         
-        // Check if we need to update proxies
-        if (now - this.lastProxyUpdate > this.proxyUpdateInterval || this.proxies.length < 3) {
-            // Start proxy update in background but don't wait for it
-            this.updateProxyList().catch(err => 
-                console.log(`Background proxy update error: ${err.message}`)
-            );
-        }
-        
         // Filter out blacklisted proxies
         const availableProxies = this.proxies.filter(proxy => {
-            const key = `${proxy.host}:${proxy.port}`;
-            const health = this.proxyHealth.get(key);
-            return health && (!health.blacklistedUntil || health.blacklistedUntil < now);
+            const health = this.proxyHealth.get(`${proxy.host}:${proxy.port}`);
+            return !health.blacklistedUntil || health.blacklistedUntil < now;
         });
 
         if (availableProxies.length === 0) {
-            console.warn('No healthy proxies available, resetting blacklist status');
-            // Reset blacklist status for all proxies
-            this.proxyHealth.forEach((health, key) => {
+            console.warn('No healthy proxies available, resetting all proxies');
+            this.proxyHealth.forEach(health => {
                 health.blacklistedUntil = null;
+                health.failures = 0;
             });
-            
-            // Try again with reset blacklist
-            const resetProxies = this.proxies.filter(proxy => {
-                const key = `${proxy.host}:${proxy.port}`;
-                return this.proxyHealth.has(key);
-            });
-            
-            if (resetProxies.length === 0) {
-                console.error('No proxies available at all, triggering immediate update');
-                // Force an immediate proxy update
-                this.lastProxyUpdate = 0;
-                this.updateProxyList().catch(err => 
-                    console.log(`Emergency proxy update error: ${err.message}`)
-                );
-                return null;
-            }
-            
-            // Sort by least failures
-            resetProxies.sort((a, b) => {
-                const healthA = this.proxyHealth.get(`${a.host}:${a.port}`);
-                const healthB = this.proxyHealth.get(`${b.host}:${b.port}`);
-                return (healthA?.failures || 0) - (healthB?.failures || 0);
-            });
-            
-            return resetProxies[0];
+            return this.proxies[0];
         }
 
-        // Sort proxies by success count (prioritize proven reliable proxies)
-        availableProxies.sort((a, b) => {
-            const healthA = this.proxyHealth.get(`${a.host}:${a.port}`);
-            const healthB = this.proxyHealth.get(`${b.host}:${b.port}`);
-            return (healthB?.successCount || 0) - (healthA?.successCount || 0);
-        });
-        
-        // Use a weighted random selection that favors proxies with higher success rates
-        const totalProxies = availableProxies.length;
-        const weightedIndex = Math.floor(Math.pow(Math.random(), 2) * totalProxies);
-        const proxy = availableProxies[weightedIndex];
+        // Rotate through available proxies
+        this.currentIndex = (this.currentIndex + 1) % availableProxies.length;
+        const proxy = availableProxies[this.currentIndex];
         
         // Update last used timestamp
-        const key = `${proxy.host}:${proxy.port}`;
-        const health = this.proxyHealth.get(key);
-        if (health) {
-            health.lastUsed = now;
-            this.proxyHealth.set(key, health);
-        }
+        const health = this.proxyHealth.get(`${proxy.host}:${proxy.port}`);
+        health.lastUsed = now;
+        this.proxyHealth.set(`${proxy.host}:${proxy.port}`, health);
 
-        console.log(`🔄 Rotating to proxy: ${proxy.host}:${proxy.port} (Protocol: ${proxy.protocol})`);
-        if (health) {
-            console.log(`📊 Proxy health status: ${health.failures} failures, ${health.successCount || 0} successes`);
-        }
+        console.log(`🔄 Rotating to proxy: ${proxy.host} (Protocol: ${proxy.protocol})`);
+        console.log(`📊 Proxy health status: ${this.proxyHealth.get(`${proxy.host}:${proxy.port}`).failures} failures`);
         
         return proxy;
     }
 
     getPuppeteerArgs(proxy) {
-        if (!proxy) return ['--no-sandbox', '--disable-setuid-sandbox'];
-        
         return [
             `--proxy-server=${this.getProxyString(proxy)}`,
             '--no-sandbox',
@@ -296,8 +140,6 @@ class ProxyManager {
     }
 
     getAxiosConfig(proxy) {
-        if (!proxy) return { timeout: 10000 };
-        
         return {
             proxy: {
                 host: proxy.host,
@@ -309,8 +151,6 @@ class ProxyManager {
     }
 
     getFetchConfig(proxy) {
-        if (!proxy) return {};
-        
         return {
             agent: new (proxy.protocol === 'http' ? HttpProxyAgent : SocksProxyAgent)(
                 this.getProxyString(proxy)

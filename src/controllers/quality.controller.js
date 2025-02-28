@@ -24,7 +24,12 @@ const WORKERS = [
     'https://q-s12.cuddly-vulture-veje.workers.dev',
     'https://q-s13.disappointed-ladybug-bdlb.workers.dev',
     'https://q-s14.javap81774.workers.dev',
-    'https://q-s15.causal-dragon-upft.workers.dev'
+    'https://q-s15.causal-dragon-upft.workers.dev',
+    'https://a.confused-sloth-iiat.workers.dev',
+    'https://b.moral-lobster-xxhs.workers.dev',
+    'https://c.frozen-cattle-xvmi.workers.dev',
+    'https://d.homely-vulture-lopr.workers.dev',
+    'https://e.better-zebra-ochc.workers.dev'
 ];
 
 const workerHealth = new Map(WORKERS.map(worker => [worker, { 

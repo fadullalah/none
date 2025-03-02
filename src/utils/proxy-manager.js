@@ -18,9 +18,7 @@ class ProxyManager {
         this.proxyTestTimeout = 3000; // 3 seconds
         
         // Fetch proxies on initialization
-        this.updateProxyList().catch(err => 
-            console.log(`Initial proxy update error: ${err.message}`)
-        );
+        this.updateProxyList().catch(err => {});
     }
 
     getProxyString(proxy) {
@@ -38,7 +36,6 @@ class ProxyManager {
             // Blacklist proxy for 10 minutes after 2 failures
             health.blacklistedUntil = Date.now() + 10 * 60 * 1000;
             health.failures = 0;
-            console.log(`🚫 Blacklisting proxy ${proxy.host}:${proxy.port} for 10 minutes`);
         }
         
         this.proxyHealth.set(key, health);
@@ -93,7 +90,6 @@ class ProxyManager {
         }
         
         this.isUpdatingProxies = true;
-        console.log('🔄 Updating proxy list...');
         
         try {
             // Use multiple reliable proxy sources
@@ -127,13 +123,11 @@ class ProxyManager {
                         newProxies.push(...sourceProxies);
                     }
                 } catch (error) {
-                    console.warn(`Failed to fetch proxies from ${source.url}: ${error.message}`);
+                    // Failed to fetch proxies from source
                 }
             }
 
             if (newProxies.length > 0) {
-                console.log(`Found ${newProxies.length} proxies, will test a sample...`);
-                
                 // Test more proxies for better reliability
                 const maxProxiesToTest = 30; // Increased from 15
                 const proxiesToTest = newProxies
@@ -152,8 +146,6 @@ class ProxyManager {
                 const workingProxies = results
                     .filter(result => result.works)
                     .map(result => result.proxy);
-                
-                console.log(`Found ${workingProxies.length} working proxies out of ${proxiesToTest.length} tested`);
                 
                 // Add working proxies to our list
                 if (workingProxies.length > 0) {
@@ -178,7 +170,6 @@ class ProxyManager {
                     this.currentIndex = 0;
                 } else if (this.proxies.length === 0) {
                     // If we didn't find any working proxies and don't have any, try a few untested ones
-                    console.log("No working proxies found in test sample, using untested proxies as fallback");
                     const untested = newProxies
                         .sort(() => 0.5 - Math.random()) // Shuffle
                         .slice(0, 10); // Take 10 random proxies
@@ -196,11 +187,9 @@ class ProxyManager {
                     
                     this.proxies = untested;
                 }
-            } else {
-                console.warn('No proxies found from any source');
             }
         } catch (error) {
-            console.error(`Error updating proxy list: ${error.message}`);
+            // Error updating proxy list
         } finally {
             this.isUpdatingProxies = false;
         }
@@ -212,9 +201,7 @@ class ProxyManager {
         // Check if we need to update proxies
         if (now - this.lastProxyUpdate > this.proxyUpdateInterval || this.proxies.length < 3) {
             // Start proxy update in background but don't wait for it
-            this.updateProxyList().catch(err => 
-                console.log(`Background proxy update error: ${err.message}`)
-            );
+            this.updateProxyList().catch(err => {});
         }
         
         // Filter out blacklisted proxies
@@ -225,7 +212,6 @@ class ProxyManager {
         });
 
         if (availableProxies.length === 0) {
-            console.warn('No healthy proxies available, resetting blacklist status');
             // Reset blacklist status for all proxies
             this.proxyHealth.forEach((health, key) => {
                 health.blacklistedUntil = null;
@@ -238,12 +224,9 @@ class ProxyManager {
             });
             
             if (resetProxies.length === 0) {
-                console.error('No proxies available at all, triggering immediate update');
                 // Force an immediate proxy update
                 this.lastProxyUpdate = 0;
-                this.updateProxyList().catch(err => 
-                    console.log(`Emergency proxy update error: ${err.message}`)
-                );
+                this.updateProxyList().catch(err => {});
                 return null;
             }
             
@@ -275,11 +258,6 @@ class ProxyManager {
         if (health) {
             health.lastUsed = now;
             this.proxyHealth.set(key, health);
-        }
-
-        console.log(`🔄 Rotating to proxy: ${proxy.host}:${proxy.port} (Protocol: ${proxy.protocol})`);
-        if (health) {
-            console.log(`📊 Proxy health status: ${health.failures} failures, ${health.successCount || 0} successes`);
         }
         
         return proxy;

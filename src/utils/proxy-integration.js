@@ -27,12 +27,10 @@ export async function withProxy(fetchFn, config = {}) {
         // If we've already tried this proxy or no proxy is available, skip
         if (!proxy || attemptedProxies.has(`${proxy.host}:${proxy.port}`)) {
             if (attempt === 0) {
-                console.log('⚠️ No suitable proxy available, proceeding without proxy');
                 try {
                     return await fetchFn(config);
                 } catch (error) {
                     lastError = error;
-                    console.log(`❌ Direct request failed: ${error.message}`);
                     continue; // Try with a proxy on next attempt
                 }
             }
@@ -41,8 +39,6 @@ export async function withProxy(fetchFn, config = {}) {
         
         // Track this proxy so we don't use it again in this request
         attemptedProxies.add(`${proxy.host}:${proxy.port}`);
-        
-        console.log(`🌐 [Attempt ${attempt + 1}/${maxRetries}] Using proxy: ${proxy.protocol}://${proxy.host}:${proxy.port}`);
         
         try {
             // Merge any provided config with the proxy config
@@ -54,12 +50,10 @@ export async function withProxy(fetchFn, config = {}) {
             };
             
             const result = await fetchFn(mergedConfig);
-            console.log(`✅ Proxy request successful: ${proxy.host}`);
             proxyManager.markProxySuccess(proxy);
             return result;
         } catch (error) {
             lastError = error;
-            console.log(`❌ Proxy request failed: ${proxy.host} - ${error.message}`);
             proxyManager.markProxyFailure(proxy);
             
             // If it's a timeout error, we'll try another proxy
@@ -67,7 +61,6 @@ export async function withProxy(fetchFn, config = {}) {
                 error.message.includes('socket hang up') ||
                 error.message.includes('ECONNRESET') ||
                 error.message.includes('ETIMEDOUT')) {
-                console.log('Timeout detected, will try another proxy');
                 continue;
             }
             
@@ -76,7 +69,6 @@ export async function withProxy(fetchFn, config = {}) {
                 error.message.includes('net::ERR_') ||
                 error.message.includes('Target closed') ||
                 error.message.includes('Session closed')) {
-                console.log('Navigation or session error detected, will try another proxy');
                 continue;
             }
             

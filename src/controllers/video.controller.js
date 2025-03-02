@@ -24,7 +24,9 @@ const PROXY_LIST = [
 // Get a random proxy from the list
 function getRandomProxy() {
   const randomIndex = Math.floor(Math.random() * PROXY_LIST.length);
-  return PROXY_LIST[randomIndex];
+  const proxy = PROXY_LIST[randomIndex];
+  // Add http:// prefix if not present
+  return proxy.startsWith('http') ? proxy : `http://${proxy}`;
 }
 
 function getTimeDiff(startTime) {
@@ -53,18 +55,22 @@ async function getBrowser(retryCount = 0, triedProxies = []) {
     
     console.log(`[Browser] Creating new browser instance with proxy: ${proxy}`);
     
+    const launchArgs = [
+      '--no-sandbox', 
+      '--disable-setuid-sandbox',
+      `--proxy-server=${proxy}`,
+      '--disable-dev-shm-usage' // Add this for Linux VPS environments
+    ];
+    
     browserInstance = await puppeteer.launch({
       headless: 'new',
-      args: [
-        '--no-sandbox', 
-        '--disable-setuid-sandbox',
-        `--proxy-server=${proxy}`
-      ]
+      args: launchArgs,
+      ignoreHTTPSErrors: true  // Add this to ignore HTTPS errors that might occur with proxies
     });
     
     return browserInstance;
   } catch (error) {
-    console.error('[Browser] Launch error:', error);
+    console.error('[Browser] Launch error with proxy:', error.toString());
     
     // Ensure browser is completely closed
     if (browserInstance) {
@@ -80,6 +86,26 @@ async function getBrowser(retryCount = 0, triedProxies = []) {
     if (retryCount < Math.min(3, PROXY_LIST.length - 1)) {
       console.log(`[Browser] Retrying with different proxy (attempt ${retryCount + 1}/3)`);
       return getBrowser(retryCount + 1, triedProxies);
+    }
+    
+    // If all proxies fail, try without proxy as fallback
+    if (retryCount === Math.min(3, PROXY_LIST.length - 1)) {
+      console.log('[Browser] All proxies failed, trying without proxy as fallback');
+      
+      try {
+        browserInstance = await puppeteer.launch({
+          headless: 'new',
+          args: [
+            '--no-sandbox', 
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage'
+          ]
+        });
+        return browserInstance;
+      } catch (fallbackError) {
+        console.error('[Browser] Fallback launch error:', fallbackError.toString());
+        throw new Error('All proxies failed, unable to create browser instance');
+      }
     }
     
     throw new Error('Failed to create browser instance with proxy after multiple attempts');

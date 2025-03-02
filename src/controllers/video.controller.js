@@ -6,7 +6,6 @@ import fetch from 'node-fetch';
 const videoStore = new Map();
 let browserInstance = null;
 
-// Proxy configuration - list of available proxies
 const PROXY_LIST = [
   '104.207.47.0:3128',
   '156.228.80.24:3128',

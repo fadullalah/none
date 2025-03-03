@@ -1,7 +1,23 @@
 import { v4 as uuidv4 } from 'uuid';
 import puppeteer from 'puppeteer-extra';
+import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 import { convertToDirectUrl } from '../utils/url-converter.js';
 import fetch from 'node-fetch';
+
+// Configure Puppeteer with stealth plugin only once
+let stealthPluginInitialized = false;
+function initializeStealthPlugin() {
+  if (!stealthPluginInitialized) {
+    try {
+      puppeteer.use(StealthPlugin());
+      stealthPluginInitialized = true;
+      console.log("[Browser] Stealth plugin initialized");
+    } catch (error) {
+      console.error("[Browser] Error initializing stealth plugin:", error.message);
+      // Continue without stealth if it fails
+    }
+  }
+}
 
 const videoStore = new Map();
 let browserInstance = null;
@@ -109,6 +125,9 @@ async function getVideoUrlDirect(url) {
 // Browser management with random proxy selection and error handling
 async function getBrowser(retryCount = 0, triedProxies = []) {
   try {
+    // Initialize stealth plugin
+    initializeStealthPlugin();
+    
     // Always close the previous browser instance to use a fresh proxy
     if (browserInstance) {
       try {
@@ -119,18 +138,24 @@ async function getBrowser(retryCount = 0, triedProxies = []) {
       browserInstance = null;
     }
     
+    // Browser launch options
+    const launchOptions = {
+      headless: 'new',
+      args: [
+        '--no-sandbox', 
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-accelerated-2d-canvas',
+        '--disable-gpu',
+        '--window-size=1920,1080'
+      ],
+      ignoreHTTPSErrors: true
+    };
+    
     // If retry count exceeds threshold or we've tried enough proxies, launch without proxy
     if (retryCount >= Math.min(3, PROXY_LIST.length - 1)) {
       console.log('[Browser] Trying without proxy as fallback');
-      browserInstance = await puppeteer.launch({
-        headless: 'new',
-        args: [
-          '--no-sandbox', 
-          '--disable-setuid-sandbox',
-          '--disable-dev-shm-usage'
-        ],
-        ignoreHTTPSErrors: true
-      });
+      browserInstance = await puppeteer.launch(launchOptions);
       return browserInstance;
     }
     
@@ -143,22 +168,13 @@ async function getBrowser(retryCount = 0, triedProxies = []) {
     
     console.log(`[Browser] Creating new browser instance with proxy: ${proxy}`);
     
-    const launchArgs = [
-      '--no-sandbox', 
-      '--disable-setuid-sandbox',
-      `--proxy-server=${proxy}`,
-      '--disable-dev-shm-usage' // Add this for Linux VPS environments
-    ];
+    // Add proxy to launch args
+    launchOptions.args.push(`--proxy-server=${proxy}`);
     
-    browserInstance = await puppeteer.launch({
-      headless: 'new',
-      args: launchArgs,
-      ignoreHTTPSErrors: true  // Add this to ignore HTTPS errors that might occur with proxies
-    });
-    
+    browserInstance = await puppeteer.launch(launchOptions);
     return browserInstance;
   } catch (error) {
-    console.error('[Browser] Launch error with proxy:', error.toString());
+    console.error('[Browser] Launch error:', error.toString());
     
     // Ensure browser is completely closed
     if (browserInstance) {
@@ -178,7 +194,9 @@ async function getBrowser(retryCount = 0, triedProxies = []) {
         args: [
           '--no-sandbox', 
           '--disable-setuid-sandbox',
-          '--disable-dev-shm-usage'
+          '--disable-dev-shm-usage',
+          '--disable-accelerated-2d-canvas',
+          '--disable-gpu'
         ],
         ignoreHTTPSErrors: true
       });
@@ -240,73 +258,101 @@ async function getVideoUrl(page, embedUrl, retryCount = 0, triedProxies = []) {
   let apiResponseTime = null;
 
   try {
-    // Configure proxy authentication if needed (commented out by default)
-    // If your proxy requires authentication, uncomment and configure this:
-    /*
-    await page.authenticate({
-      username: 'proxy-username',
-      password: 'proxy-password'
-    });
-    */
+    // Wait a moment before interacting with the page to ensure it's ready
+    await new Promise(resolve => setTimeout(resolve, 500));
     
     // Set up request interception
-    await page.setRequestInterception(true);
+    try {
+      await page.setRequestInterception(true);
+    } catch (interceptError) {
+      console.error('[Browser] Error setting up request interception:', interceptError.message);
+      // Continue without interception if it fails
+    }
 
     const responsePromise = new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
         reject(new Error('API response timeout'));
-      }, 20000); // Increased timeout
+      }, 20000); // 20 second timeout
 
       page.on('request', request => {
-        const resourceType = request.resourceType();
-        if (['image', 'stylesheet', 'font', 'media'].includes(resourceType)) {
-          request.abort();
-          return;
-        }
-        
-        const url = request.url();
-        if (url.includes('/api/b/movie') || url.includes('/api/b/tv')) {
-          console.log('[Browser] Detected API request:', url);
-        }
-        request.continue();
-      });
-
-      page.on('response', async response => {
-        const url = response.url();
-        if (url.includes('/api/b/movie') || url.includes('/api/b/tv')) {
+        try {
+          const resourceType = request.resourceType();
+          if (['image', 'stylesheet', 'font', 'media'].includes(resourceType)) {
+            request.abort();
+            return;
+          }
+          
+          const url = request.url();
+          if (url.includes('/api/b/movie') || url.includes('/api/b/tv')) {
+            console.log('[Browser] Detected API request:', url);
+          }
+          request.continue();
+        } catch (requestError) {
+          console.error('[Browser] Error handling request:', requestError.message);
           try {
-            const responseStartTime = performance.now();
-            responseUrl = url;
-            // Direct request without proxy
-            const data = await response.json();
-            apiResponseTime = getTimeDiff(responseStartTime);
-            console.log(`[Browser] API response captured in: ${apiResponseTime}`);
-            apiResponseData = data;
-            clearTimeout(timeout);
-            resolve(data);
-          } catch (e) {
-            console.log('[Browser] Failed to parse API response:', e.message);
+            request.continue();
+          } catch (continueError) {
+            // Ignore continue errors
           }
         }
       });
+
+      page.on('response', async response => {
+        try {
+          const url = response.url();
+          if (url.includes('/api/b/movie') || url.includes('/api/b/tv')) {
+            try {
+              const responseStartTime = performance.now();
+              responseUrl = url;
+              const data = await response.json();
+              apiResponseTime = getTimeDiff(responseStartTime);
+              console.log(`[Browser] API response captured in: ${apiResponseTime}`);
+              apiResponseData = data;
+              clearTimeout(timeout);
+              resolve(data);
+            } catch (jsonError) {
+              console.log('[Browser] Failed to parse API response:', jsonError.message);
+            }
+          }
+        } catch (responseError) {
+          console.error('[Browser] Error handling response:', responseError.message);
+        }
+      });
+    });
+
+    // Add error handlers
+    page.on('error', err => {
+      console.error('[Browser] Page error:', err.message);
+    });
+    
+    page.on('pageerror', err => {
+      console.error('[Browser] Page error in browser context:', err.message);
     });
 
     // Navigate to page with shorter timeout
     console.log('[Browser] Navigating to page');
     const navigationStartTime = performance.now();
     
-    await Promise.race([
-      page.goto(embedUrl, {
-        waitUntil: 'domcontentloaded',
-        timeout: 15000
-      }),
-      responsePromise
-    ]);    
+    try {
+      await Promise.race([
+        page.goto(embedUrl, {
+          waitUntil: 'domcontentloaded',
+          timeout: 15000
+        }),
+        responsePromise
+      ]);
+    } catch (navigationError) {
+      console.error('[Browser] Navigation error:', navigationError.message);
+      // If navigation fails but we still get an API response, we can continue
+      if (!apiResponseData) {
+        throw navigationError;
+      }
+    }
 
     console.log(`[Time] Navigation took: ${getTimeDiff(navigationStartTime)}`);
 
-    // Wait for the API response
-    const data = await responsePromise;
+    // Wait for the API response if not already received
+    const data = apiResponseData || await responsePromise;
     
     // Process response
     const results = await processApiResponse(data);

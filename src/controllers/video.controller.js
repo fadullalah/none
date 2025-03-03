@@ -32,6 +32,80 @@ function getTimeDiff(startTime) {
   return `${(performance.now() - startTime).toFixed(2)}ms`;
 }
 
+// Direct API request fallback when all proxies fail
+async function getVideoUrlDirect(url) {
+  const startTime = performance.now();
+  console.log(`[Direct] Attempting direct API request as fallback for: ${url}`);
+  
+  try {
+    // Extract ID, season, and episode from the URL
+    let apiUrl;
+    try {
+      if (url.includes('/movie/')) {
+        const id = url.split('/movie/')[1].split('/')[0];
+        apiUrl = `https://vidlink.pro/api/b/movie/${id}`;
+      } else if (url.includes('/tv/')) {
+        const parts = url.split('/tv/')[1].split('/');
+        const id = parts[0];
+        const season = parts[1];
+        const episode = parts[2];
+        apiUrl = `https://vidlink.pro/api/b/tv/${id}/${season}/${episode}`;
+      } else {
+        throw new Error('Unsupported URL format for direct API request');
+      }
+    } catch (parseError) {
+      console.error(`[Direct] Failed to parse URL ${url}: ${parseError.message}`);
+      throw new Error(`Unable to parse URL format: ${parseError.message}`);
+    }
+    
+    console.log(`[Direct] Requesting API: ${apiUrl}`);
+    
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 20000); // 20 second timeout
+    
+    try {
+      const response = await fetch(apiUrl, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+          'Referer': 'https://vidlink.pro/',
+          'Accept': 'application/json'
+        },
+        signal: controller.signal
+      });
+      
+      clearTimeout(timeoutId);
+      
+      if (!response.ok) {
+        throw new Error(`API responded with status: ${response.status}`);
+      }
+      
+      const data = await response.json();
+      const results = await processApiResponse(data);
+      
+      console.log(`[Direct] API request successful, took: ${getTimeDiff(startTime)}`);
+      
+      return {
+        results,
+        apiUrl,
+        timing: {
+          total: getTimeDiff(startTime),
+          method: 'direct'
+        }
+      };
+    } catch (fetchError) {
+      if (fetchError.name === 'AbortError') {
+        throw new Error('Direct API request timed out after 20 seconds');
+      }
+      throw fetchError;
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  } catch (error) {
+    console.error(`[Direct] API request failed: ${error.message}`);
+    throw new Error(`Direct API request failed: ${error.message}`);
+  }
+}
+
 // Browser management with random proxy selection and error handling
 async function getBrowser(retryCount = 0, triedProxies = []) {
   try {
@@ -43,6 +117,21 @@ async function getBrowser(retryCount = 0, triedProxies = []) {
         console.error('[Browser] Error closing existing browser:', e.message);
       }
       browserInstance = null;
+    }
+    
+    // If retry count exceeds threshold or we've tried enough proxies, launch without proxy
+    if (retryCount >= Math.min(3, PROXY_LIST.length - 1)) {
+      console.log('[Browser] Trying without proxy as fallback');
+      browserInstance = await puppeteer.launch({
+        headless: 'new',
+        args: [
+          '--no-sandbox', 
+          '--disable-setuid-sandbox',
+          '--disable-dev-shm-usage'
+        ],
+        ignoreHTTPSErrors: true
+      });
+      return browserInstance;
     }
     
     // Select a random proxy that hasn't been tried yet in this retry sequence
@@ -81,33 +170,23 @@ async function getBrowser(retryCount = 0, triedProxies = []) {
       browserInstance = null;
     }
     
-    // Retry with a different proxy if available
-    if (retryCount < Math.min(3, PROXY_LIST.length - 1)) {
-      console.log(`[Browser] Retrying with different proxy (attempt ${retryCount + 1}/3)`);
-      return getBrowser(retryCount + 1, triedProxies);
+    // If all proxies fail, try without proxy
+    console.log('[Browser] Launch failed, trying without proxy');
+    try {
+      browserInstance = await puppeteer.launch({
+        headless: 'new',
+        args: [
+          '--no-sandbox', 
+          '--disable-setuid-sandbox',
+          '--disable-dev-shm-usage'
+        ],
+        ignoreHTTPSErrors: true
+      });
+      return browserInstance;
+    } catch (fallbackError) {
+      console.error('[Browser] Fallback launch error:', fallbackError.toString());
+      throw new Error('Unable to create browser instance: ' + fallbackError.message);
     }
-    
-    // If all proxies fail, try without proxy as fallback
-    if (retryCount === Math.min(3, PROXY_LIST.length - 1)) {
-      console.log('[Browser] All proxies failed, trying without proxy as fallback');
-      
-      try {
-        browserInstance = await puppeteer.launch({
-          headless: 'new',
-          args: [
-            '--no-sandbox', 
-            '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage'
-          ]
-        });
-        return browserInstance;
-      } catch (fallbackError) {
-        console.error('[Browser] Fallback launch error:', fallbackError.toString());
-        throw new Error('All proxies failed, unable to create browser instance');
-      }
-    }
-    
-    throw new Error('Failed to create browser instance with proxy after multiple attempts');
   }
 }
 
@@ -249,9 +328,9 @@ async function getVideoUrl(page, embedUrl, retryCount = 0, triedProxies = []) {
   } catch (error) {
     console.error('[Browser] Error:', error.message);
     
-    // Try again with a different proxy
+    // Try again with a different proxy or without proxy
     if (retryCount < Math.min(3, PROXY_LIST.length - 1)) {
-      console.log(`[Browser] Retrying request with different proxy (attempt ${retryCount + 1}/3)`);
+      console.log(`[Browser] Retrying request with different proxy or without proxy (attempt ${retryCount + 1}/3)`);
       
       // Close the current page and browser
       try {
@@ -270,15 +349,15 @@ async function getVideoUrl(page, embedUrl, retryCount = 0, triedProxies = []) {
         browserInstance = null;
       }
       
-      // Get a new browser with a different proxy
-      const browser = await getBrowser(0, triedProxies);
+      // Get a new browser (might be without proxy if retries exceeded)
+      const browser = await getBrowser(retryCount + 1, triedProxies);
       const newPage = await browser.newPage();
       
-      // Retry with the new page and a different proxy
+      // Retry with the new page
       return getVideoUrl(newPage, embedUrl, retryCount + 1, triedProxies);
     }
     
-    // No more fallback options, just throw the error
+    // No more retries, throw the original error
     throw new Error(`Failed to extract video data: ${error.message}`);
   }
 }
@@ -290,14 +369,17 @@ export const videoController = {
     if (!embedUrl) return res.status(400).json({ error: 'Embed URL required' });
 
     let page = null;
+    
     try {
       const browserStartTime = performance.now();
       const browser = await getBrowser();
       console.log(`[Time] Browser get/launch took: ${getTimeDiff(browserStartTime)}`);
 
       page = await browser.newPage();
+      
+      // Try Puppeteer (with or without proxy, handled by getBrowser)
       const data = await getVideoUrl(page, embedUrl);
-
+      
       if (data.results?.length > 0) {
         const uniqueId = uuidv4();
         videoStore.set(uniqueId, data.results[0].video_urls[0]);
@@ -314,10 +396,11 @@ export const videoController = {
         res.status(404).json({ error: 'No video data found' });
       }
     } catch (error) {
+      console.error(`[Controller] Fatal error in getVideoUrlFromEmbed: ${error.message}`, error);
+      // Always respond with a meaningful error, no matter what happens
       res.status(500).json({ 
         error: 'Failed to fetch video data', 
         details: error.message,
-        method: 'Proxy failed',
         timing: { totalTime: getTimeDiff(totalStartTime) }
       });
     } finally {
@@ -337,9 +420,10 @@ export const videoController = {
     let page = null;
     
     try {
+      const url = `https://vidlink.pro/tv/${id}/${season}/${episode}`;
       const browser = await getBrowser();
       page = await browser.newPage();
-      const data = await getVideoUrl(page, `https://vidlink.pro/tv/${id}/${season}/${episode}`);
+      const data = await getVideoUrl(page, url);
       
       console.log(`[Time] Total request time: ${getTimeDiff(totalStartTime)}`);
       res.json({ 
@@ -351,6 +435,7 @@ export const videoController = {
         }
       });
     } catch (error) {
+      console.error(`[Controller] Error in getTVEpisode: ${error.message}`, error);
       res.status(500).json({ 
         status: 'error', 
         message: error.message,
@@ -373,9 +458,10 @@ export const videoController = {
     let page = null;
     
     try {
+      const url = `https://vidlink.pro/movie/${id}`;
       const browser = await getBrowser();
       page = await browser.newPage();
-      const data = await getVideoUrl(page, `https://vidlink.pro/movie/${id}`);
+      const data = await getVideoUrl(page, url);
       
       console.log(`[Time] Total request time: ${getTimeDiff(totalStartTime)}`);
       res.json({ 
@@ -387,6 +473,7 @@ export const videoController = {
         }
       });
     } catch (error) {
+      console.error(`[Controller] Error in getMovie: ${error.message}`, error);
       res.status(500).json({ 
         status: 'error', 
         message: error.message,

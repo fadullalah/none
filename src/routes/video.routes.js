@@ -33,7 +33,4 @@ router.get('/quality', qualityController.getQualityInfo);
 // New player scraper route - fixed binding issue
 router.get('/extract-video', (req, res) => playerScraperController.extractVideoUrl(req, res));
 
-// Add this route to your existing routes
-router.get('/watch/:id', videoController.watchVideo);
-
 export default router;

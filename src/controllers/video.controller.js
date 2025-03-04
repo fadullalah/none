@@ -3,7 +3,6 @@ import puppeteer from 'puppeteer-extra';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 import { convertToDirectUrl } from '../utils/url-converter.js';
 import fetch from 'node-fetch';
-import { createClient } from 'redis';
 
 // Configure Puppeteer with stealth plugin only once
 let stealthPluginInitialized = false;
@@ -25,21 +24,55 @@ let browserInstance = null;
 const pagePool = [];
 const MAX_POOL_SIZE = 3;
 
-// Redis client setup
-const redisClient = createClient({
-  url: process.env.REDIS_URL // Railway automatically adds this environment variable
-});
+// Add a cache with longer TTL for video data
+const videoCache = new Map();
+const videoStore = new Map();
+const CACHE_TTL = 86400000; // 24 hours in milliseconds
+const MAX_CACHE_SIZE = 1000; // Maximum number of items in cache
+const STORE_TTL = 3600000; // 1 hour TTL for videoStore items
 
-// Connect to Redis and handle errors
-(async () => {
-  redisClient.on('error', (err) => console.error('Redis Client Error', err));
-  await redisClient.connect();
-  console.log('Connected to Redis');
-})();
+// Add cache cleanup function
+function cleanupCaches() {
+  const now = Date.now();
+  
+  // Clean videoCache
+  let expiredCount = 0;
+  for (const [key, value] of videoCache.entries()) {
+    if (value.expiry < now) {
+      videoCache.delete(key);
+      expiredCount++;
+    }
+  }
+  
+  // Clean videoStore
+  let expiredStoreCount = 0;
+  for (const [key, value] of videoStore.entries()) {
+    if (value.expiry < now) {
+      videoStore.delete(key);
+      expiredStoreCount++;
+    }
+  }
+  
+  if (expiredCount > 0 || expiredStoreCount > 0) {
+    console.log(`[Cache] Cleanup: Removed ${expiredCount} expired cache entries and ${expiredStoreCount} expired store entries`);
+  }
+  
+  // Implement LRU-like eviction if cache is too large
+  if (videoCache.size > MAX_CACHE_SIZE) {
+    // Sort by expiry and remove oldest
+    const sortedEntries = [...videoCache.entries()]
+      .sort((a, b) => a[1].expiry - b[1].expiry);
+    
+    const entriesToRemove = sortedEntries.slice(0, videoCache.size - MAX_CACHE_SIZE);
+    for (const [key] of entriesToRemove) {
+      videoCache.delete(key);
+    }
+    console.log(`[Cache] Size limit reached: Evicted ${entriesToRemove.length} oldest entries`);
+  }
+}
 
-// Cache TTL settings
-const CACHE_TTL = 86400; // 24 hours in seconds
-const STORE_TTL = 3600;  // 1 hour in seconds
+// Run cleanup every 15 minutes
+setInterval(cleanupCaches, 15 * 60 * 1000);
 
 function getTimeDiff(startTime) {
   return `${(performance.now() - startTime).toFixed(2)}ms`;
@@ -354,37 +387,29 @@ export const videoController = {
     const { embedUrl } = req.query;
     if (!embedUrl) return res.status(400).json({ error: 'Embed URL required' });
 
-    // Check Redis cache first
-    try {
-      const cachedData = await redisClient.get(`videoCache:${embedUrl}`);
-      
-      if (cachedData) {
+    // Check cache first
+    if (videoCache.has(embedUrl)) {
+      const cachedData = videoCache.get(embedUrl);
+      if (cachedData.expiry > Date.now()) {
         console.log(`[Cache] Serving cached response for: ${embedUrl}`);
         
         // Generate a new unique ID for this watch session
         const uniqueId = uuidv4();
-        const parsedData = JSON.parse(cachedData);
-        
-        // Store the watch URL in Redis with TTL
-        await redisClient.set(
-          `videoStore:${uniqueId}`, 
-          parsedData.results[0].video_urls[0], 
-          { EX: STORE_TTL }
-        );
+        videoStore.set(uniqueId, cachedData.data.results[0].video_urls[0]);
         
         return res.json({
-          ...parsedData,
+          ...cachedData.data,
           watchUrl: `${process.env.BASE_URL}/watch/${uniqueId}`,
           timing: {
-            ...parsedData.timing,
+            ...cachedData.data.timing,
             total: getTimeDiff(totalStartTime),
             fromCache: true
           }
         });
+      } else {
+        console.log(`[Cache] Expired cache for: ${embedUrl}`);
+        videoCache.delete(embedUrl);
       }
-    } catch (cacheError) {
-      console.error(`[Cache] Error reading from cache: ${cacheError.message}`);
-      // Continue with fetching if cache fails
     }
     
     try {
@@ -393,24 +418,21 @@ export const videoController = {
       
       if (data.results?.length > 0) {
         const uniqueId = uuidv4();
+        // Store with expiry time
+        videoStore.set(uniqueId, {
+          url: data.results[0].video_urls[0],
+          expiry: Date.now() + STORE_TTL
+        });
         
-        try {
-          // Store with expiry time in Redis
-          await redisClient.set(
-            `videoStore:${uniqueId}`, 
-            data.results[0].video_urls[0], 
-            { EX: STORE_TTL }
-          );
-          
-          // Store in Redis cache with TTL
-          await redisClient.set(
-            `videoCache:${embedUrl}`, 
-            JSON.stringify(data), 
-            { EX: CACHE_TTL }
-          );
-        } catch (redisError) {
-          console.error(`[Cache] Error writing to Redis: ${redisError.message}`);
-          // Continue even if caching fails
+        // Store in cache
+        videoCache.set(embedUrl, {
+          data,
+          expiry: Date.now() + CACHE_TTL
+        });
+        
+        // Run cleanup if cache is getting large
+        if (videoCache.size > MAX_CACHE_SIZE * 0.9) {
+          cleanupCaches();
         }
         
         console.log(`[Time] Total request time: ${getTimeDiff(totalStartTime)}`);
@@ -439,43 +461,36 @@ export const videoController = {
     const totalStartTime = performance.now();
     const { id, season, episode } = req.params;
     
-    // Check Redis cache first
-    const cacheKey = `videoCache:tv:${id}:${season}:${episode}`;
-    try {
-      const cachedData = await redisClient.get(cacheKey);
-      
-      if (cachedData) {
+    // Check cache first
+    const cacheKey = `https://vidlink.pro/tv/${id}/${season}/${episode}`;
+    if (videoCache.has(cacheKey)) {
+      const cachedData = videoCache.get(cacheKey);
+      if (cachedData.expiry > Date.now()) {
         console.log(`[Cache] Serving cached response for: ${cacheKey}`);
-        const parsedData = JSON.parse(cachedData);
-        
         return res.json({
           status: 'success',
-          ...parsedData,
+          ...cachedData.data,
           timing: {
-            ...parsedData.timing,
+            ...cachedData.data.timing,
             total: getTimeDiff(totalStartTime),
             fromCache: true
           }
         });
+      } else {
+        console.log(`[Cache] Expired cache for: ${cacheKey}`);
+        videoCache.delete(cacheKey);
       }
-    } catch (cacheError) {
-      console.error(`[Cache] Error reading from cache: ${cacheError.message}`);
     }
     
     try {
       const url = `https://vidlink.pro/tv/${id}/${season}/${episode}`;
       const data = await getVideoWithFallback(url);
       
-      // Store in Redis cache
-      try {
-        await redisClient.set(
-          cacheKey, 
-          JSON.stringify(data), 
-          { EX: CACHE_TTL }
-        );
-      } catch (redisError) {
-        console.error(`[Cache] Error writing to Redis: ${redisError.message}`);
-      }
+      // Store in cache
+      videoCache.set(cacheKey, {
+        data,
+        expiry: Date.now() + CACHE_TTL
+      });
       
       console.log(`[Time] Total request time: ${getTimeDiff(totalStartTime)}`);
       res.json({ 
@@ -500,43 +515,36 @@ export const videoController = {
     const totalStartTime = performance.now();
     const { id } = req.params;
     
-    // Check Redis cache first
-    const cacheKey = `videoCache:movie:${id}`;
-    try {
-      const cachedData = await redisClient.get(cacheKey);
-      
-      if (cachedData) {
+    // Check cache first
+    const cacheKey = `https://vidlink.pro/movie/${id}`;
+    if (videoCache.has(cacheKey)) {
+      const cachedData = videoCache.get(cacheKey);
+      if (cachedData.expiry > Date.now()) {
         console.log(`[Cache] Serving cached response for: ${cacheKey}`);
-        const parsedData = JSON.parse(cachedData);
-        
         return res.json({
           status: 'success',
-          ...parsedData,
+          ...cachedData.data,
           timing: {
-            ...parsedData.timing,
+            ...cachedData.data.timing,
             total: getTimeDiff(totalStartTime),
             fromCache: true
           }
         });
+      } else {
+        console.log(`[Cache] Expired cache for: ${cacheKey}`);
+        videoCache.delete(cacheKey);
       }
-    } catch (cacheError) {
-      console.error(`[Cache] Error reading from cache: ${cacheError.message}`);
     }
     
     try {
       const url = `https://vidlink.pro/movie/${id}`;
       const data = await getVideoWithFallback(url);
       
-      // Store in Redis cache
-      try {
-        await redisClient.set(
-          cacheKey, 
-          JSON.stringify(data), 
-          { EX: CACHE_TTL }
-        );
-      } catch (redisError) {
-        console.error(`[Cache] Error writing to Redis: ${redisError.message}`);
-      }
+      // Store in cache
+      videoCache.set(cacheKey, {
+        data,
+        expiry: Date.now() + CACHE_TTL
+      });
       
       console.log(`[Time] Total request time: ${getTimeDiff(totalStartTime)}`);
       res.json({ 
@@ -553,30 +561,6 @@ export const videoController = {
         status: 'error', 
         message: error.message,
         timing: { totalTime: getTimeDiff(totalStartTime) }
-      });
-    }
-  },
-  
-  // Add an endpoint to watch videos using the unique ID
-  async watchVideo(req, res) {
-    const { id } = req.params;
-    
-    try {
-      const videoUrl = await redisClient.get(`videoStore:${id}`);
-      
-      if (!videoUrl) {
-        return res.status(404).json({ 
-          error: 'Video not found or link expired' 
-        });
-      }
-      
-      // Redirect to the video URL or handle as needed
-      res.redirect(videoUrl);
-    } catch (error) {
-      console.error(`[Controller] Error in watchVideo: ${error.message}`);
-      res.status(500).json({ 
-        error: 'Failed to retrieve video', 
-        details: error.message 
       });
     }
   }

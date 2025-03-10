@@ -10,6 +10,8 @@ import { seriesScraperController } from '../controllers/series.scraper.controlle
 import { parentalRatingController } from '../controllers/parental.rating.controller.js';
 import { showboxController } from '../controllers/showbox.controller.js';
 import { playerScraperController } from '../controllers/player.scraper.controller.js';
+import { faselhdController } from '../controllers/faselhd.controller.js';
+import { alootvController } from '../controllers/alooytv.controller.js';
 
 const router = express.Router();
 
@@ -30,7 +32,15 @@ router.get('/showbox/:type/:tmdbId', showboxController.getShowboxUrl);
 // New quality route
 router.get('/quality', qualityController.getQualityInfo);
 
-// New player scraper route - fixed binding issue
+// Player scraper route
 router.get('/extract-video', (req, res) => playerScraperController.extractVideoUrl(req, res));
+
+// FaselHD routes
+router.get('/faselhd/movie/:tmdbId', faselhdController.getMovieByTmdbId.bind(faselhdController));
+router.get('/faselhd/tv/:tmdbId', faselhdController.getTvEpisodeByTmdbId.bind(faselhdController));
+
+// AlooTV routes
+router.get('/alootv/movie/:tmdbId', alootvController.getMovieByTmdbId.bind(alootvController));
+router.get('/alootv/tv/:tmdbId', alootvController.getTvEpisodeByTmdbId.bind(alootvController));
 
 export default router;

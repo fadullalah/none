@@ -19,7 +19,7 @@ class FaselHDController {
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
       'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
       'Accept-Language': 'en-US,en;q=0.9,ar;q=0.8',
-      'Cookie': 'fcuid=43653ef215e35c1300dbb7612f17251c409594c8'
+      'Cookie': 'fcuid=6a5935fc9d86eee313dba99b2d118b6d3dc808e0'
     };
   }
 

@@ -10,6 +10,11 @@ puppeteerExtra.use(StealthPlugin());
 // Cache with 3 hour TTL
 const alootvCache = new NodeCache({ stdTTL: 10800 });
 
+// Browser pool management
+let browserInstance = null;
+let browserLastUsed = 0;
+const BROWSER_IDLE_TIMEOUT = 300000; // 5 minutes
+
 class AlooTVController {
   constructor() {
     this.gatewayUrl = 'https://fitnur.com/alooytv';
@@ -20,6 +25,46 @@ class AlooTVController {
       'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
       'Accept-Language': 'en-US,en;q=0.9,ar;q=0.8'
     };
+    
+    // Set up browser cleanup interval
+    setInterval(this.cleanupBrowser.bind(this), 60000); // Check every minute
+  }
+
+  /**
+   * Get or create a browser instance
+   * @returns {Promise<Browser>} Puppeteer browser instance
+   */
+  async getBrowser() {
+    if (!browserInstance) {
+      console.log('Creating new browser instance');
+      browserInstance = await puppeteerExtra.launch({
+        headless: "new", // Use the new headless mode for better performance
+        args: [
+          '--no-sandbox',
+          '--disable-setuid-sandbox',
+          '--disable-web-security',
+          '--disable-features=IsolateOrigins,site-per-process',
+          '--disable-dev-shm-usage', // Overcome limited resource issues
+          '--js-flags=--expose-gc', // Expose garbage collector
+          '--disable-gpu',
+          '--window-size=1366,768'
+        ]
+      });
+    }
+    
+    browserLastUsed = Date.now();
+    return browserInstance;
+  }
+
+  /**
+   * Clean up browser if idle for too long
+   */
+  async cleanupBrowser() {
+    if (browserInstance && Date.now() - browserLastUsed > BROWSER_IDLE_TIMEOUT) {
+      console.log('Closing idle browser instance');
+      await browserInstance.close();
+      browserInstance = null;
+    }
   }
 
   /**
@@ -193,24 +238,20 @@ class AlooTVController {
       return cachedDomain;
     }
     
-    let browser = null;
     try {
-      browser = await puppeteerExtra.launch({
-        headless: false,
-        args: [
-          '--no-sandbox',
-          '--disable-setuid-sandbox',
-          '--disable-web-security',
-          '--disable-features=IsolateOrigins,site-per-process'
-        ]
-      });
-      
+      const browser = await this.getBrowser();
       const page = await browser.newPage();
       await page.setUserAgent(this.headers['User-Agent']);
       await page.setExtraHTTPHeaders(this.headers);
       
+      // Set shorter timeout
+      await page.setDefaultNavigationTimeout(20000);
+      
       // Navigate to the gateway page
-      await page.goto(this.gatewayUrl, { waitUntil: 'networkidle2', timeout: 30000 });
+      await page.goto(this.gatewayUrl, { 
+        waitUntil: 'domcontentloaded', // Use faster page load strategy
+        timeout: 20000 
+      });
       
       // Find and click the first link to the main site
       const mainSiteLink = await page.evaluate(() => {
@@ -226,17 +267,14 @@ class AlooTVController {
       const url = new URL(mainSiteLink);
       const domain = url.origin;
       
-      // Cache the domain
-      alootvCache.set(cacheKey, domain, 3600); // Cache for 1 hour
+      // Cache the domain for longer period
+      alootvCache.set(cacheKey, domain, 6 * 3600); // Cache for 6 hours
       
+      await page.close(); // Close page but keep browser
       return domain;
     } catch (error) {
       console.error(`Error discovering AlooTV domain: ${error.message}`);
       throw error;
-    } finally {
-      if (browser) {
-        await browser.close();
-      }
     }
   }
 
@@ -255,24 +293,31 @@ class AlooTVController {
       return cachedResults;
     }
     
-    let browser = null;
     try {
-      browser = await puppeteerExtra.launch({
-        headless: false,
-        args: [
-          '--no-sandbox',
-          '--disable-setuid-sandbox',
-          '--disable-web-security',
-          '--disable-features=IsolateOrigins,site-per-process'
-        ]
+      const browser = await this.getBrowser();
+      const page = await browser.newPage();
+      
+      // Optimize page for speed
+      await page.setRequestInterception(true);
+      page.on('request', (request) => {
+        // Block unnecessary resources
+        const resourceType = request.resourceType();
+        if (['image', 'stylesheet', 'font', 'media'].includes(resourceType)) {
+          request.abort();
+        } else {
+          request.continue();
+        }
       });
       
-      const page = await browser.newPage();
       await page.setUserAgent(this.headers['User-Agent']);
       await page.setExtraHTTPHeaders(this.headers);
+      await page.setDefaultNavigationTimeout(20000);
       
-      // Navigate to search page
-      await page.goto(searchUrl, { waitUntil: 'networkidle2', timeout: 30000 });
+      // Navigate to search page with faster load strategy
+      await page.goto(searchUrl, { 
+        waitUntil: 'domcontentloaded', 
+        timeout: 20000 
+      });
       
       // Extract search results
       const searchResults = await page.evaluate(() => {
@@ -281,15 +326,13 @@ class AlooTVController {
         
         movieContainers.forEach(container => {
           const titleElement = container.querySelector('.movie-title h3 a');
-          const imageElement = container.querySelector('img.img-responsive');
           const linkElement = container.querySelector('a.ico-play');
-          const episodesElement = container.querySelector('.video_quality span');
           
           if (titleElement && linkElement) {
             const title = titleElement.textContent.trim();
             const link = linkElement.href;
-            const image = imageElement ? imageElement.src : '';
-            const episodesText = episodesElement ? episodesElement.textContent.trim() : '';
+            const image = container.querySelector('img.img-responsive')?.src || '';
+            const episodesText = container.querySelector('.video_quality span')?.textContent.trim() || '';
             const episodesMatch = episodesText.match(/(\d+)/);
             const episodeCount = episodesMatch ? parseInt(episodesMatch[1]) : 0;
             
@@ -308,14 +351,11 @@ class AlooTVController {
       // Cache results
       alootvCache.set(cacheKey, searchResults, 21600); // Cache for 6 hours
       
+      await page.close(); // Close page but keep browser
       return searchResults;
     } catch (error) {
       console.error(`Error searching AlooTV: ${error.message}`);
       throw error;
-    } finally {
-      if (browser) {
-        await browser.close();
-      }
     }
   }
 
@@ -332,24 +372,31 @@ class AlooTVController {
       return cachedDetails;
     }
     
-    let browser = null;
     try {
-      browser = await puppeteerExtra.launch({
-        headless: false,
-        args: [
-          '--no-sandbox',
-          '--disable-setuid-sandbox',
-          '--disable-web-security',
-          '--disable-features=IsolateOrigins,site-per-process'
-        ]
+      const browser = await this.getBrowser();
+      const page = await browser.newPage();
+      
+      // Optimize page loading
+      await page.setRequestInterception(true);
+      page.on('request', (request) => {
+        // Block unnecessary resources
+        const resourceType = request.resourceType();
+        if (['image', 'stylesheet', 'font'].includes(resourceType)) {
+          request.abort();
+        } else {
+          request.continue();
+        }
       });
       
-      const page = await browser.newPage();
       await page.setUserAgent(this.headers['User-Agent']);
       await page.setExtraHTTPHeaders(this.headers);
+      await page.setDefaultNavigationTimeout(20000);
       
-      // Navigate to show page
-      await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
+      // Navigate to show page with faster load strategy
+      await page.goto(url, { 
+        waitUntil: 'domcontentloaded', 
+        timeout: 20000 
+      });
       
       // Extract show details and episodes
       const showDetails = await page.evaluate(() => {
@@ -401,14 +448,11 @@ class AlooTVController {
       // Cache results
       alootvCache.set(cacheKey, showDetails, 21600); // Cache for 6 hours
       
+      await page.close(); // Close page but keep browser
       return showDetails;
     } catch (error) {
       console.error(`Error getting AlooTV show details: ${error.message}`);
       throw error;
-    } finally {
-      if (browser) {
-        await browser.close();
-      }
     }
   }
 
@@ -428,123 +472,86 @@ class AlooTVController {
     
     console.log(`Extracting video from: ${episodeUrl}`);
     
-    let browser = null;
     try {
-      browser = await puppeteerExtra.launch({
-        headless: false,
-        args: [
-          '--no-sandbox',
-          '--disable-setuid-sandbox',
-          '--disable-web-security',
-          '--disable-features=IsolateOrigins,site-per-process',
-          '--window-size=1366,768'
-        ]
-      });
-      
+      const browser = await this.getBrowser();
       const page = await browser.newPage();
+      
       await page.setUserAgent(this.headers['User-Agent']);
       await page.setExtraHTTPHeaders(this.headers);
+      await page.setDefaultNavigationTimeout(30000);
       
-      // Enable request interception to catch video resources
+      // Only track video-related requests to reduce overhead
       let videoUrls = [];
       await page.setRequestInterception(true);
       
       page.on('request', request => {
-        // Log video file requests
         const url = request.url();
-        if (url.endsWith('.mp4') || url.includes('.mp4?') || url.endsWith('.m3u8') || url.includes('.m3u8?')) {
-          console.log(`Found video URL in request: ${url}`);
+        const resourceType = request.resourceType();
+        
+        // Only track potential video resources
+        if ((url.endsWith('.mp4') || url.includes('.mp4?') || 
+             url.endsWith('.m3u8') || url.includes('.m3u8?'))) {
           videoUrls.push(url);
         }
-        request.continue();
+        
+        // Skip less important resources
+        if (['image', 'font', 'stylesheet'].includes(resourceType)) {
+          request.abort();
+        } else {
+          request.continue();
+        }
       });
       
-      // Navigate to episode page
+      // Navigate to episode page with optimized loading strategy
       console.log(`Loading page ${episodeUrl}`);
-      await page.goto(episodeUrl, { waitUntil: 'networkidle2', timeout: 60000 });
-      console.log('Page loaded successfully');
+      await page.goto(episodeUrl, { 
+        waitUntil: 'domcontentloaded', 
+        timeout: 30000 
+      });
       
-      // Take screenshot for debugging
-      await page.screenshot({ path: 'episode-page.png' });
-      
-      // Look for video and source elements
+      // Look for video and source elements using optimized query
       const videoUrl = await page.evaluate(() => {
-        // Check for video element with source child
-        const videoElements = document.querySelectorAll('video');
-        console.log(`Found ${videoElements.length} video elements`);
-        
-        for (const video of videoElements) {
-          const sources = video.querySelectorAll('source');
-          console.log(`Video has ${sources.length} source elements`);
+        // Optimized DOM query - avoid multiple querySelectorAll calls
+        const videos = document.querySelectorAll('video');
+        for (const video of videos) {
+          if (video.src) return video.src;
           
-          // Prefer MP4 sources
-          for (const source of sources) {
-            if (source.src && (source.type === 'video/mp4' || source.src.endsWith('.mp4'))) {
-              console.log(`Found MP4 source: ${source.src}`);
-              return source.src;
-            }
-          }
-          
-          // Return any source if no MP4 found
-          if (sources.length > 0 && sources[0].src) {
-            console.log(`Using first available source: ${sources[0].src}`);
-            return sources[0].src;
-          }
-          
-          // Check if the video itself has a src attribute
-          if (video.src) {
-            console.log(`Video has direct src: ${video.src}`);
-            return video.src;
-          }
+          const source = video.querySelector('source[src]');
+          if (source) return source.src;
         }
         
-        // Look for iframe that might contain the video
-        const iframes = document.querySelectorAll('iframe');
-        if (iframes.length > 0) {
-          console.log(`Found ${iframes.length} iframes, may need to check them for videos`);
-          return null; // Will use intercepted URLs instead
+        // Check for video sources outside video elements
+        const sources = document.querySelectorAll('source[src]');
+        for (const source of sources) {
+          if (source.src) return source.src;
         }
         
         return null;
       });
       
-      let finalVideoUrl = null;
+      let finalVideoUrl = videoUrl;
       
-      // Use the video URL found in the DOM if available
-      if (videoUrl) {
-        finalVideoUrl = videoUrl;
-        console.log(`Found video URL in DOM: ${finalVideoUrl}`);
-      } 
-      // Otherwise use URLs captured from network requests
-      else if (videoUrls.length > 0) {
+      // If no video found in DOM, use the ones captured from network
+      if (!finalVideoUrl && videoUrls.length > 0) {
         // Prefer MP4 over M3U8
         const mp4Urls = videoUrls.filter(url => url.includes('.mp4'));
-        if (mp4Urls.length > 0) {
-          finalVideoUrl = mp4Urls[0];
-        } else {
-          finalVideoUrl = videoUrls[0];
-        }
-        console.log(`Using video URL from network requests: ${finalVideoUrl}`);
+        finalVideoUrl = mp4Urls.length > 0 ? mp4Urls[0] : videoUrls[0];
       }
-      // Fall back to returning the page URL
-      else {
+      
+      // Fall back to page URL if necessary
+      if (!finalVideoUrl) {
         finalVideoUrl = page.url();
-        console.log(`No video URL found, returning page URL: ${finalVideoUrl}`);
       }
       
       // Cache the URL
       alootvCache.set(cacheKey, finalVideoUrl, 3600); // Cache for 1 hour
       
+      await page.close(); // Close page but keep browser
       return finalVideoUrl;
     } catch (error) {
       console.error(`Error extracting video URL: ${error.message}`);
       console.error(error.stack);
       throw error;
-    } finally {
-      if (browser) {
-        console.log('Closing browser');
-        await browser.close();
-      }
     }
   }
 }

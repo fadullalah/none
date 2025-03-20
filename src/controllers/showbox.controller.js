@@ -86,18 +86,80 @@ async function searchShowboxByTitle(title, type, year) {
     const yearText = $(item).find('.film-year, .year, [class*="year"]').text().trim();
     const yearMatch = yearText.match(/\d{4}/);
     const itemYear = yearMatch ? parseInt(yearMatch[0]) : null;
-    const id = link ? link.split('/detail/')[1] : null;
     
-    return { title: itemTitle, year: itemYear, link, id };
+    // Extract ID from the link - handle both /detail/ and /tv/t- or /movie/m- formats
+    let id = null;
+    if (link) {
+      const detailMatch = link.match(/\/detail\/(\d+)/);
+      if (detailMatch) {
+        id = detailMatch[1];
+      } else {
+        // Extract ID from URL format like /tv/t-taskmaster-2015
+        const urlMatch = link.match(/\/(tv|movie)\/[mt]-(.+?)-(\d+)$/);
+        if (urlMatch) {
+          id = `${urlMatch[2]}-${urlMatch[3]}`;  // Create an ID from the slug
+        }
+      }
+    }
+    
+    return { 
+      title: itemTitle, 
+      year: itemYear, 
+      link, 
+      id,
+      fullUrl: `https://showbox.media${link}`
+    };
   }).get();
 
-  const exactMatch = results.find(result => {
+  // First try exact match
+  let match = results.find(result => {
     const titleMatch = result.title.toLowerCase() === title.toLowerCase();
     const yearMatch = !year || !result.year || Math.abs(result.year - year) <= 1;
     return titleMatch && yearMatch;
   });
 
-  return exactMatch;
+  // If no exact match, try partial match
+  if (!match) {
+    match = results.find(result => {
+      const titleMatch = result.title.toLowerCase().includes(title.toLowerCase());
+      // For TV shows, be more lenient with year matching since they run multiple years
+      const yearMatch = type === 'tv' ? true : (!year || !result.year || Math.abs(result.year - year) <= 2);
+      return titleMatch && yearMatch;
+    });
+  }
+
+  // If still no match, return the first result that contains the title
+  if (!match) {
+    match = results.find(result => 
+      result.title.toLowerCase().includes(title.toLowerCase())
+    );
+  }
+
+  // If we found a match but need to get its detail page ID
+  if (match && !match.id.match(/^\d+$/)) {
+    try {
+      // Fetch the detail page to get the numeric ID
+      const detailResponse = await fetch(getScraperUrl(match.fullUrl));
+      const detailHtml = await detailResponse.text();
+      const $detail = cheerio.load(detailHtml);
+      
+      // Look for the ID in various places
+      const watchButton = $detail('.watch-now').attr('href');
+      const detailMatch = watchButton?.match(/\/detail\/(\d+)/) || 
+                         detailHtml.match(/\/detail\/(\d+)/);
+      
+      if (detailMatch) {
+        match.id = detailMatch[1];
+      }
+    } catch (error) {
+      console.error('Failed to fetch detail page:', error);
+    }
+  }
+
+  console.log('🔍 Search results:', results.length ? results : 'No results');
+  console.log('✅ Best match:', match || 'No match found');
+
+  return match;
 }
 
 async function getFebboxShareLink(showboxId, type) {
@@ -150,6 +212,32 @@ async function getStreamLinks(fid) {
   }));
 }
 
+async function searchIMDB(title) {
+  try {
+    const response = await fetch(`https://www.imdb.com/find/?q=${encodeURIComponent(title)}`);
+    const html = await response.text();
+    const $ = cheerio.load(html);
+    
+    const results = [];
+    $('.find-title-result').each((_, item) => {
+      const title = $(item).find('.ipc-metadata-list-summary-item__t').text().trim();
+      const yearText = $(item).find('.ipc-metadata-list-summary-item__li').first().text().trim();
+      const yearMatch = yearText.match(/(\d{4})/);
+      const year = yearMatch ? parseInt(yearMatch[1]) : null;
+      const isTV = $(item).text().toLowerCase().includes('tv series');
+      
+      if (isTV) {
+        results.push({ title, year });
+      }
+    });
+    
+    return results;
+  } catch (error) {
+    console.error('❌ IMDB search failed:', error);
+    return [];
+  }
+}
+
 async function tryUrlBasedId(title, year, type) {
   const formattedTitle = title.toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
@@ -157,31 +245,51 @@ async function tryUrlBasedId(title, year, type) {
     .replace(/^-|-$/g, '');
 
   const prefix = type === 'movie' ? 'm-' : 't-';
-  const url = getScraperUrl(`https://showbox.media/${type}/${prefix}${formattedTitle}-${year}`);
   
-  console.log(`🎯 Trying URL-based approach: ${url}`);
-  const response = await fetch(url);
+  // First try with the provided year
+  let urls = [`https://showbox.media/${type}/${prefix}${formattedTitle}-${year}`];
   
-  if (!response.ok) {
-    console.log('⚠️ URL-based approach failed');
-    return null;
-  }
+  // Get additional years from IMDB
+  const imdbResults = await searchIMDB(title);
+  console.log('🎬 IMDB results:', imdbResults);
+  
+  // Add URLs for each IMDB year found
+  imdbResults.forEach(result => {
+    if (result.year && result.year !== year) {
+      urls.push(`https://showbox.media/${type}/${prefix}${formattedTitle}-${result.year}`);
+    }
+  });
+  
+  // Try each URL
+  for (const url of urls) {
+    console.log(`🎯 Trying URL: ${url}`);
+    try {
+      const response = await fetch(getScraperUrl(url));
+      
+      if (!response.ok) {
+        continue;
+      }
 
-  const html = await response.text();
-  const $ = cheerio.load(html);
-  
-  const detailUrl = $('link[rel="canonical"]').attr('href') || 
-                   $('.watch-now').attr('href') || 
-                   $('a[href*="/detail/"]').attr('href');
-                   
-  if (detailUrl) {
-    const idMatch = detailUrl.match(/\/detail\/(\d+)/);
-    if (idMatch) {
-      console.log(`✅ Found ID via URL approach: ${idMatch[1]}`);
-      return idMatch[1];
+      const html = await response.text();
+      const $ = cheerio.load(html);
+      
+      const detailUrl = $('link[rel="canonical"]').attr('href') || 
+                       $('.watch-now').attr('href') || 
+                       $('a[href*="/detail/"]').attr('href');
+                       
+      if (detailUrl) {
+        const idMatch = detailUrl.match(/\/detail\/(\d+)/);
+        if (idMatch) {
+          console.log(`✅ Found ID via URL approach: ${idMatch[1]} (${url})`);
+          return idMatch[1];
+        }
+      }
+    } catch (error) {
+      console.error(`❌ Error trying URL ${url}:`, error);
     }
   }
   
+  console.log('⚠️ URL-based approach failed for all years');
   return null;
 }
 
@@ -292,30 +400,43 @@ export const showboxController = {
             file.is_dir === 1 && file.file_name.toLowerCase().includes('season')
           );
 
-          for (const seasonFolder of seasonFolders) {
-            const seasonNumber = parseInt(seasonFolder.file_name.match(/\d+/)?.[0] || '0', 10);
-            if (isNaN(seasonNumber)) continue;
+          // If specific season and episode are requested, only process that season
+          if (season) {
+            const targetSeasonFolder = seasonFolders.find(folder => {
+              const seasonNum = parseInt(folder.file_name.match(/\d+/)?.[0] || '0', 10);
+              return seasonNum === parseInt(season, 10);
+            });
 
-            const episodeFiles = await fetchFebboxFiles(shareKey, seasonFolder.fid);
-            const seasonEpisodes = await Promise.all(episodeFiles.map(async (episodeFile) => {
-              const ext = episodeFile.file_name.split('.').pop().toLowerCase();
-              const episodeNumber = parseInt(episodeFile.file_name.match(/E(\d+)/i)?.[1] || '0', 10);
-              const qualityMatch = episodeFile.file_name.match(/(1080p|720p|480p|360p|2160p|4k)/i);
-              const playerSources = await getStreamLinks(episodeFile.fid);
+            if (targetSeasonFolder) {
+              const episodeFiles = await fetchFebboxFiles(shareKey, targetSeasonFolder.fid);
+              const seasonEpisodes = await Promise.all(episodeFiles.map(async (episodeFile) => {
+                const ext = episodeFile.file_name.split('.').pop().toLowerCase();
+                const episodeNumber = parseInt(episodeFile.file_name.match(/E(\d+)/i)?.[1] || '0', 10);
+                
+                // If specific episode is requested, only process that episode
+                if (episode && episodeNumber !== parseInt(episode, 10)) {
+                  return null;
+                }
 
-              return {
-                episode: episodeNumber,
-                filename: episodeFile.file_name,
-                quality: qualityMatch ? qualityMatch[1] : 'Unknown',
-                type: ext,
-                size: episodeFile.file_size,
-                player_streams: playerSources,
-                direct_download: `https://www.febbox.com/file/download_share?fid=${episodeFile.fid}&share_key=${shareKey}`
-              };
-            }));
-            
-            if (seasonEpisodes.length > 0) {
-              seasons[seasonNumber] = seasonEpisodes;
+                const qualityMatch = episodeFile.file_name.match(/(1080p|720p|480p|360p|2160p|4k)/i);
+                const playerSources = await getStreamLinks(episodeFile.fid);
+
+                return {
+                  episode: episodeNumber,
+                  filename: episodeFile.file_name,
+                  quality: qualityMatch ? qualityMatch[1] : 'Unknown',
+                  type: ext,
+                  size: episodeFile.file_size,
+                  player_streams: playerSources,
+                  direct_download: `https://www.febbox.com/file/download_share?fid=${episodeFile.fid}&share_key=${shareKey}`
+                };
+              }));
+
+              // Filter out null values and only keep the requested episode
+              const filteredEpisodes = seasonEpisodes.filter(e => e !== null);
+              if (filteredEpisodes.length > 0) {
+                seasons[parseInt(season, 10)] = filteredEpisodes;
+              }
             }
           }
 

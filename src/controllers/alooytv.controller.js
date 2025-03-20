@@ -241,13 +241,16 @@ class AlooTVController {
     const cacheKey = 'alootv_current_domain';
     const cachedDomain = alootvCache.get(cacheKey);
     
+    // Use cached domain if available
     if (cachedDomain) {
       return cachedDomain;
     }
     
     try {
       console.log('Fetching AlooTV domain from worker...');
-      const response = await axios.get('https://domain.nunflix-info.workers.dev/');
+      const response = await axios.get('https://domain.nunflix-info.workers.dev/', {
+        timeout: 10000
+      });
       const domain = response.data.trim();
       
       if (!domain) {
@@ -260,12 +263,36 @@ class AlooTVController {
       const formattedDomain = `https://${domain}`;
       
       // Cache the domain
-      alootvCache.set(cacheKey, formattedDomain, 6 * 3600); // Cache for 6 hours
+      alootvCache.set(cacheKey, formattedDomain, 24 * 3600); // Cache for 24 hours
       
       return formattedDomain;
     } catch (error) {
       console.error(`Error discovering AlooTV domain: ${error.message}`);
-      throw error;
+      
+      // Return a default/fallback domain if we have one (optional)
+      const fallbackDomains = [
+        'https://ab.8alooytv.shop',
+        'https://ab.alooytv.xyz',
+        'https://ab.alooytv.com'
+      ];
+      
+      for (const fallbackDomain of fallbackDomains) {
+        console.log(`Trying fallback domain: ${fallbackDomain}`);
+        try {
+          // Just check if the domain exists, don't send a HEAD request
+          await axios.get(`${fallbackDomain}`, { 
+            timeout: 10000,
+            validateStatus: () => true // Accept any status code
+          });
+          console.log(`Using fallback domain: ${fallbackDomain}`);
+          alootvCache.set(cacheKey, fallbackDomain, 12 * 3600); // Cache for 12 hours
+          return fallbackDomain;
+        } catch (fallbackError) {
+          console.error(`Fallback domain ${fallbackDomain} failed: ${fallbackError.message}`);
+        }
+      }
+      
+      throw new Error('Could not find valid AlooTV domain');
     }
   }
 

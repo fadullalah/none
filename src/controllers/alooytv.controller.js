@@ -38,17 +38,24 @@ class AlooTVController {
     if (!browserInstance) {
       console.log('Creating new browser instance');
       browserInstance = await puppeteerExtra.launch({
-        headless: "new", // Use the new headless mode for better performance
+        headless: "new",  // Use new headless mode
+        defaultViewport: {
+          width: 1366,
+          height: 768
+        },
         args: [
           '--no-sandbox',
           '--disable-setuid-sandbox',
           '--disable-web-security',
           '--disable-features=IsolateOrigins,site-per-process',
-          '--disable-dev-shm-usage', // Overcome limited resource issues
-          '--js-flags=--expose-gc', // Expose garbage collector
+          '--disable-dev-shm-usage',
+          '--js-flags=--expose-gc',
           '--disable-gpu',
-          '--window-size=1366,768'
-        ]
+          '--window-size=1366,768',
+          '--disable-notifications',
+          '--disable-infobars'
+        ],
+        ignoreDefaultArgs: ['--enable-automation'] // Hide automation
       });
     }
     
@@ -238,19 +245,18 @@ class AlooTVController {
       return cachedDomain;
     }
     
+    let page = null;
     try {
       const browser = await this.getBrowser();
-      const page = await browser.newPage();
+      page = await browser.newPage();
+      
       await page.setUserAgent(this.headers['User-Agent']);
       await page.setExtraHTTPHeaders(this.headers);
       
-      // Set shorter timeout
-      await page.setDefaultNavigationTimeout(20000);
-      
-      // Navigate to the gateway page
+      console.log('Navigating to gateway page...');
       await page.goto(this.gatewayUrl, { 
-        waitUntil: 'domcontentloaded', // Use faster page load strategy
-        timeout: 20000 
+        waitUntil: 'domcontentloaded',
+        timeout: 30000 
       });
       
       // Find and click the first link to the main site
@@ -263,18 +269,29 @@ class AlooTVController {
         throw new Error('Could not find link to main AlooTV site');
       }
       
+      console.log('Found main site link:', mainSiteLink);
+      
       // Get the domain from the href
       const url = new URL(mainSiteLink);
       const domain = url.origin;
       
-      // Cache the domain for longer period
+      // Cache the domain
       alootvCache.set(cacheKey, domain, 6 * 3600); // Cache for 6 hours
       
-      await page.close(); // Close page but keep browser
       return domain;
     } catch (error) {
       console.error(`Error discovering AlooTV domain: ${error.message}`);
       throw error;
+    } finally {
+      // Always close the page in finally block
+      if (page) {
+        try {
+          await page.close();
+          console.log('Page closed successfully');
+        } catch (closeError) {
+          console.error('Error closing page:', closeError);
+        }
+      }
     }
   }
 

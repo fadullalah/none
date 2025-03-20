@@ -234,7 +234,7 @@ class AlooTVController {
   }
 
   /**
-   * Discover the current domain by navigating through the gateway page
+   * Discover the current domain by using the domain worker
    * @returns {Promise<string>} Current domain for AlooTV
    */
   async discoverCurrentDomain() {
@@ -245,53 +245,27 @@ class AlooTVController {
       return cachedDomain;
     }
     
-    let page = null;
     try {
-      const browser = await this.getBrowser();
-      page = await browser.newPage();
+      console.log('Fetching AlooTV domain from worker...');
+      const response = await axios.get('https://domain.nunflix-info.workers.dev/');
+      const domain = response.data.trim();
       
-      await page.setUserAgent(this.headers['User-Agent']);
-      await page.setExtraHTTPHeaders(this.headers);
-      
-      console.log('Navigating to gateway page...');
-      await page.goto(this.gatewayUrl, { 
-        waitUntil: 'domcontentloaded',
-        timeout: 30000 
-      });
-      
-      // Find and click the first link to the main site
-      const mainSiteLink = await page.evaluate(() => {
-        const links = Array.from(document.querySelectorAll('a[href*="alooytv"]'));
-        return links.length > 0 ? links[0].href : null;
-      });
-      
-      if (!mainSiteLink) {
-        throw new Error('Could not find link to main AlooTV site');
+      if (!domain) {
+        throw new Error('Empty domain returned from worker');
       }
       
-      console.log('Found main site link:', mainSiteLink);
+      console.log('Found domain:', domain);
       
-      // Get the domain from the href
-      const url = new URL(mainSiteLink);
-      const domain = url.origin;
+      // Format the domain with https protocol
+      const formattedDomain = `https://${domain}`;
       
       // Cache the domain
-      alootvCache.set(cacheKey, domain, 6 * 3600); // Cache for 6 hours
+      alootvCache.set(cacheKey, formattedDomain, 6 * 3600); // Cache for 6 hours
       
-      return domain;
+      return formattedDomain;
     } catch (error) {
       console.error(`Error discovering AlooTV domain: ${error.message}`);
       throw error;
-    } finally {
-      // Always close the page in finally block
-      if (page) {
-        try {
-          await page.close();
-          console.log('Page closed successfully');
-        } catch (closeError) {
-          console.error('Error closing page:', closeError);
-        }
-      }
     }
   }
 

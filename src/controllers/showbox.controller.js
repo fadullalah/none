@@ -14,6 +14,10 @@ const __dirname = dirname(__filename);
 // Create a cache for storing ShowBox results (TTL: 6 hours)
 const showboxCache = new NodeCache({ stdTTL: 21600 });
 
+// Add these near the top with other cache declarations
+const imdbCache = new NodeCache({ stdTTL: 86400 }); // 24 hours
+const urlCache = new NodeCache({ stdTTL: 43200 }); // 12 hours
+
 const SCRAPER_API_KEY = '169e05c208dcbe5e453edd9c5957cc40';
 const UI_TOKENS = [
   'eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpYXQiOjE3Mzg3NzAxNjUsIm5iZiI6MTczODc3MDE2NSwiZXhwIjoxNzY5ODc0MTg1LCJkYXRhIjp7InVpZCI6Mzc2ODAyLCJ0b2tlbiI6IjkzNzM1MzViOTk3Yjk4ZmM5ZGY0YjVkYzA2ZWRjN2RiIn19.A3PZeqXtQm4YnxR4yOSHDnTDx4hayAC1VvD-s6aBEzo',
@@ -213,6 +217,14 @@ async function getStreamLinks(fid) {
 }
 
 async function searchIMDB(title) {
+  // Check cache first
+  const cacheKey = `imdb:${title.toLowerCase()}`;
+  const cached = imdbCache.get(cacheKey);
+  if (cached) {
+    console.log('📦 Using cached IMDB results');
+    return cached;
+  }
+
   try {
     const response = await fetch(`https://www.imdb.com/find/?q=${encodeURIComponent(title)}`);
     const html = await response.text();
@@ -231,6 +243,8 @@ async function searchIMDB(title) {
       }
     });
     
+    // Cache the results
+    imdbCache.set(cacheKey, results);
     return results;
   } catch (error) {
     console.error('❌ IMDB search failed:', error);
@@ -246,50 +260,99 @@ async function tryUrlBasedId(title, year, type) {
 
   const prefix = type === 'movie' ? 'm-' : 't-';
   
-  // First try with the provided year
-  let urls = [`https://showbox.media/${type}/${prefix}${formattedTitle}-${year}`];
-  
-  // Get additional years from IMDB
-  const imdbResults = await searchIMDB(title);
-  console.log('🎬 IMDB results:', imdbResults);
-  
-  // Add URLs for each IMDB year found
-  imdbResults.forEach(result => {
-    if (result.year && result.year !== year) {
-      urls.push(`https://showbox.media/${type}/${prefix}${formattedTitle}-${result.year}`);
-    }
-  });
-  
-  // Try each URL
-  for (const url of urls) {
-    console.log(`🎯 Trying URL: ${url}`);
-    try {
-      const response = await fetch(getScraperUrl(url));
-      
-      if (!response.ok) {
-        continue;
-      }
+  // Check URL cache first
+  const cacheKey = `url:${type}:${formattedTitle}:${year}`;
+  const cachedId = urlCache.get(cacheKey);
+  if (cachedId) {
+    console.log('📦 Using cached ShowBox ID');
+    return cachedId;
+  }
 
+  // First try with the provided year
+  const url = `https://showbox.media/${type}/${prefix}${formattedTitle}-${year}`;
+  
+  console.log(`🎯 Trying URL: ${url}`);
+  try {
+    const response = await fetch(getScraperUrl(url));
+    
+    if (response.ok) {
       const html = await response.text();
       const $ = cheerio.load(html);
       
       const detailUrl = $('link[rel="canonical"]').attr('href') || 
-                       $('.watch-now').attr('href') || 
-                       $('a[href*="/detail/"]').attr('href');
-                       
+                     $('.watch-now').attr('href') || 
+                     $('a[href*="/detail/"]').attr('href');
+                     
       if (detailUrl) {
         const idMatch = detailUrl.match(/\/detail\/(\d+)/);
         if (idMatch) {
+          urlCache.set(cacheKey, idMatch[1]);
           console.log(`✅ Found ID via URL approach: ${idMatch[1]} (${url})`);
           return idMatch[1];
         }
       }
-    } catch (error) {
-      console.error(`❌ Error trying URL ${url}:`, error);
     }
+
+    // Only if first attempt failed, try IMDB years as fallback
+    console.log('⚠️ Initial URL attempt failed, trying IMDB fallback...');
+    const imdbResults = await searchIMDB(title);
+    
+    // Sort years by closest to target year
+    imdbResults.sort((a, b) => {
+      const aDiff = Math.abs((a.year || 0) - year);
+      const bDiff = Math.abs((b.year || 0) - year);
+      return aDiff - bDiff;
+    });
+
+    // Try all IMDB years in parallel
+    const yearAttempts = imdbResults
+      .filter(result => result.year && result.year !== year)
+      .map(async (result) => {
+        const fallbackUrl = `https://showbox.media/${type}/${prefix}${formattedTitle}-${result.year}`;
+        console.log(`🎯 Trying year ${result.year}`);
+        
+        try {
+          const fallbackResponse = await fetch(getScraperUrl(fallbackUrl));
+          if (!fallbackResponse.ok) return null;
+
+          const fallbackHtml = await fallbackResponse.text();
+          const $fallback = cheerio.load(fallbackHtml);
+          
+          const fallbackDetailUrl = $fallback('link[rel="canonical"]').attr('href') || 
+                                  $fallback('.watch-now').attr('href') || 
+                                  $fallback('a[href*="/detail/"]').attr('href');
+                                  
+          if (fallbackDetailUrl) {
+            const fallbackIdMatch = fallbackDetailUrl.match(/\/detail\/(\d+)/);
+            if (fallbackIdMatch) {
+              return {
+                id: fallbackIdMatch[1],
+                url: fallbackUrl,
+                year: result.year
+              };
+            }
+          }
+          return null;
+        } catch (error) {
+          console.error(`❌ Error trying year ${result.year}:`, error);
+          return null;
+        }
+      });
+
+    // Wait for all attempts to complete and get the first successful result
+    const results = await Promise.all(yearAttempts);
+    const successfulResult = results.find(r => r !== null);
+    
+    if (successfulResult) {
+      urlCache.set(cacheKey, successfulResult.id);
+      console.log(`✅ Found ID via IMDB fallback: ${successfulResult.id} (${successfulResult.url})`);
+      return successfulResult.id;
+    }
+  } catch (error) {
+    console.error(`❌ Error in tryUrlBasedId:`, error);
   }
   
-  console.log('⚠️ URL-based approach failed for all years');
+  console.log('⚠️ URL-based approach failed for all attempts');
   return null;
 }
 

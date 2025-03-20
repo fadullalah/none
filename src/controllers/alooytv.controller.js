@@ -20,14 +20,50 @@ class AlooTVController {
     this.gatewayUrl = 'https://fitnur.com/alooytv';
     this.tmdbApiKey = process.env.API_TOKEN;
     this.tmdbApiBaseUrl = 'https://api.themoviedb.org/3';
+    
+    // Enhanced headers to appear as a regular browser coming from Google
     this.headers = {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-      'Accept-Language': 'en-US,en;q=0.9,ar;q=0.8'
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+      'Accept-Language': 'en-US,en;q=0.9,ar;q=0.8',
+      'Accept-Encoding': 'gzip, deflate, br',
+      'Referer': 'https://www.google.com/',
+      'Origin': 'https://www.google.com',
+      'Sec-Ch-Ua': '"Google Chrome";v="123", "Not:A-Brand";v="8", "Chromium";v="123"',
+      'Sec-Ch-Ua-Mobile': '?0',
+      'Sec-Ch-Ua-Platform': '"Windows"',
+      'Sec-Fetch-Dest': 'document',
+      'Sec-Fetch-Mode': 'navigate',
+      'Sec-Fetch-Site': 'cross-site',
+      'Sec-Fetch-User': '?1',
+      'Upgrade-Insecure-Requests': '1',
+      'Cache-Control': 'max-age=0',
+      'Connection': 'keep-alive'
     };
     
     // Set up browser cleanup interval
     setInterval(this.cleanupBrowser.bind(this), 60000); // Check every minute
+    
+    // Setup header rotation interval
+    setInterval(this.rotateUserAgent.bind(this), 600000); // Rotate user agent every 10 minutes
+  }
+  
+  /**
+   * Rotate user agent to avoid detection patterns
+   */
+  rotateUserAgent() {
+    const userAgents = [
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
+      'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15',
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36 Edg/123.0.0.0',
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/123.0',
+      'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36'
+    ];
+    
+    // Select a random user agent
+    const randomAgent = userAgents[Math.floor(Math.random() * userAgents.length)];
+    this.headers['User-Agent'] = randomAgent;
+    console.log('Rotated user agent to:', randomAgent);
   }
 
   /**
@@ -82,11 +118,13 @@ class AlooTVController {
   async getMovieDetailsFromTMDB(tmdbId) {
     try {
       const url = `${this.tmdbApiBaseUrl}/movie/${tmdbId}?api_key=${this.tmdbApiKey}&language=ar`;
-      const response = await axios.get(url);
+      const response = await axios.get(url, { headers: this.headers });
       return response.data;
     } catch (error) {
-      console.error(`Error fetching movie details from TMDB: ${error.message}`);
-      throw new Error(`TMDB API error: ${error.message}`);
+      const statusCode = error.response?.status || 'No status code';
+      const errorCode = error.code || 'No error code';
+      console.error(`Error fetching movie details from TMDB: ${error.message}, Status: ${statusCode}, Code: ${errorCode}`);
+      throw new Error(`TMDB API error: ${error.message}, Status: ${statusCode}, Code: ${errorCode}`);
     }
   }
 
@@ -98,12 +136,14 @@ class AlooTVController {
   async getTVDetailsFromTMDB(tmdbId) {
     try {
       const url = `${this.tmdbApiBaseUrl}/tv/${tmdbId}?api_key=${this.tmdbApiKey}&language=ar`;
-      const response = await axios.get(url);
+      const response = await axios.get(url, { headers: this.headers });
       return response.data;
     }
     catch (error) {
-      console.error(`Error fetching TV details from TMDB: ${error.message}`);
-      throw new Error(`TMDB API error: ${error.message}`);
+      const statusCode = error.response?.status || 'No status code';
+      const errorCode = error.code || 'No error code';
+      console.error(`Error fetching TV details from TMDB: ${error.message}, Status: ${statusCode}, Code: ${errorCode}`);
+      throw new Error(`TMDB API error: ${error.message}, Status: ${statusCode}, Code: ${errorCode}`);
     }
   }
 
@@ -145,11 +185,15 @@ class AlooTVController {
         player_url: playerUrl
       });
     } catch (error) {
-      console.error(`Error getting movie from AlooTV: ${error.message}`);
+      const statusCode = error.response?.status || 'No status code';
+      const errorCode = error.code || 'No error code';
+      console.error(`Error getting movie from AlooTV: ${error.message}, Status: ${statusCode}, Code: ${errorCode}`);
       return res.status(500).json({
         success: false,
         message: 'Failed to get movie from AlooTV',
-        error: error.message
+        error: error.message,
+        status_code: statusCode,
+        error_code: errorCode
       });
     }
   }
@@ -224,11 +268,15 @@ class AlooTVController {
         player_url: playerUrl
       });
     } catch (error) {
-      console.error(`Error getting TV episode from AlooTV: ${error.message}`);
+      const statusCode = error.response?.status || 'No status code';
+      const errorCode = error.code || 'No error code';
+      console.error(`Error getting TV episode from AlooTV: ${error.message}, Status: ${statusCode}, Code: ${errorCode}`);
       return res.status(500).json({
         success: false,
         message: 'Failed to get TV episode from AlooTV',
-        error: error.message
+        error: error.message,
+        status_code: statusCode,
+        error_code: errorCode
       });
     }
   }
@@ -248,7 +296,8 @@ class AlooTVController {
     try {
       console.log('Fetching AlooTV domain from worker...');
       const response = await axios.get('https://domain.nunflix-info.workers.dev/', {
-        timeout: 5000
+        timeout: 5000,
+        headers: this.headers
       });
       const domain = response.data.trim();
       
@@ -266,7 +315,9 @@ class AlooTVController {
       
       return formattedDomain;
     } catch (error) {
-      console.error(`Error discovering AlooTV domain: ${error.message}`);
+      const statusCode = error.response?.status || 'No status code';
+      const errorCode = error.code || 'No error code';
+      console.error(`Error discovering AlooTV domain: ${error.message}, Status: ${statusCode}, Code: ${errorCode}`);
       throw error;
     }
   }
@@ -302,8 +353,8 @@ class AlooTVController {
         }
       });
       
-      await page.setUserAgent(this.headers['User-Agent']);
-      await page.setExtraHTTPHeaders(this.headers);
+      // Apply enhanced headers for better anonymity
+      await this.applyEnhancedPageHeaders(page);
       await page.setDefaultNavigationTimeout(20000);
       
       // Navigate to search page with faster load strategy
@@ -347,7 +398,9 @@ class AlooTVController {
       await page.close(); // Close page but keep browser
       return searchResults;
     } catch (error) {
-      console.error(`Error searching AlooTV: ${error.message}`);
+      const statusCode = error.response?.status || 'No status code';
+      const errorCode = error.code || 'No error code';
+      console.error(`Error searching AlooTV: ${error.message}, Status: ${statusCode}, Code: ${errorCode}`);
       throw error;
     }
   }
@@ -380,8 +433,7 @@ class AlooTVController {
         }
       });
       
-      await page.setUserAgent(this.headers['User-Agent']);
-      await page.setExtraHTTPHeaders(this.headers);
+      await this.applyEnhancedPageHeaders(page);
       await page.setDefaultNavigationTimeout(20000);
       
       // Navigate to show page with faster load strategy
@@ -475,7 +527,9 @@ class AlooTVController {
       await page.close(); // Close page but keep browser
       return showDetails;
     } catch (error) {
-      console.error(`Error getting AlooTV show details: ${error.message}`);
+      const statusCode = error.response?.status || 'No status code';
+      const errorCode = error.code || 'No error code';
+      console.error(`Error getting AlooTV show details: ${error.message}, Status: ${statusCode}, Code: ${errorCode}`);
       throw error;
     }
   }
@@ -500,8 +554,7 @@ class AlooTVController {
       const browser = await this.getBrowser();
       const page = await browser.newPage();
       
-      await page.setUserAgent(this.headers['User-Agent']);
-      await page.setExtraHTTPHeaders(this.headers);
+      await this.applyEnhancedPageHeaders(page);
       await page.setDefaultNavigationTimeout(30000);
       
       // Only track video-related requests to reduce overhead
@@ -573,10 +626,27 @@ class AlooTVController {
       await page.close(); // Close page but keep browser
       return finalVideoUrl;
     } catch (error) {
-      console.error(`Error extracting video URL: ${error.message}`);
+      const statusCode = error.response?.status || 'No status code';
+      const errorCode = error.code || 'No error code';
+      console.error(`Error extracting video URL: ${error.message}, Status: ${statusCode}, Code: ${errorCode}`);
       console.error(error.stack);
       throw error;
     }
+  }
+
+  /**
+   * Apply enhanced headers to request
+   * @param {Object} page - Puppeteer page
+   */
+  async applyEnhancedPageHeaders(page) {
+    await page.setUserAgent(this.headers['User-Agent']);
+    await page.setExtraHTTPHeaders(this.headers);
+    
+    // Set Google as the referrer
+    await page.evaluateOnNewDocument(() => {
+      Object.defineProperty(document, 'referrer', { get: () => 'https://www.google.com/' });
+      Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+    });
   }
 }
 

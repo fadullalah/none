@@ -241,7 +241,6 @@ class AlooTVController {
     const cacheKey = 'alootv_current_domain';
     const cachedDomain = alootvCache.get(cacheKey);
     
-    // Use cached domain if available
     if (cachedDomain) {
       return cachedDomain;
     }
@@ -249,7 +248,7 @@ class AlooTVController {
     try {
       console.log('Fetching AlooTV domain from worker...');
       const response = await axios.get('https://domain.nunflix-info.workers.dev/', {
-        timeout: 10000
+        timeout: 5000
       });
       const domain = response.data.trim();
       
@@ -262,37 +261,13 @@ class AlooTVController {
       // Format the domain with https protocol
       const formattedDomain = `https://${domain}`;
       
-      // Cache the domain
-      alootvCache.set(cacheKey, formattedDomain, 24 * 3600); // Cache for 24 hours
+      // Cache the domain for longer to reduce API calls
+      alootvCache.set(cacheKey, formattedDomain, 12 * 3600); // Cache for 12 hours
       
       return formattedDomain;
     } catch (error) {
       console.error(`Error discovering AlooTV domain: ${error.message}`);
-      
-      // Return a default/fallback domain if we have one (optional)
-      const fallbackDomains = [
-        'https://ab.8alooytv.shop',
-        'https://ab.alooytv.xyz',
-        'https://ab.alooytv.com'
-      ];
-      
-      for (const fallbackDomain of fallbackDomains) {
-        console.log(`Trying fallback domain: ${fallbackDomain}`);
-        try {
-          // Just check if the domain exists, don't send a HEAD request
-          await axios.get(`${fallbackDomain}`, { 
-            timeout: 10000,
-            validateStatus: () => true // Accept any status code
-          });
-          console.log(`Using fallback domain: ${fallbackDomain}`);
-          alootvCache.set(cacheKey, fallbackDomain, 12 * 3600); // Cache for 12 hours
-          return fallbackDomain;
-        } catch (fallbackError) {
-          console.error(`Fallback domain ${fallbackDomain} failed: ${fallbackError.message}`);
-        }
-      }
-      
-      throw new Error('Could not find valid AlooTV domain');
+      throw error;
     }
   }
 
@@ -415,50 +390,31 @@ class AlooTVController {
         timeout: 20000 
       });
       
-      console.log(`Analyzing show page: ${url}`);
-      
-      // Extract show details and episodes with improved selector handling
+      // Extract show details and episodes - using fast, targeted selectors
       const showDetails = await page.evaluate(() => {
-        const title = document.querySelector('h1.movie-title, .movie-title h1')?.textContent.trim() || 
+        const title = document.querySelector('h1.movie-title')?.textContent.trim() || 
+                     document.querySelector('.movie-title h1')?.textContent.trim() || 
                      document.querySelector('h1')?.textContent.trim() || '';
         const image = document.querySelector('.img-responsive')?.src || '';
-        const description = document.querySelector('.synopsis, .description')?.textContent.trim() || '';
-        
-        // Debug what we're seeing
-        const pageContent = {
-          hasSeasonClass: !!document.querySelector('.season'),
-          hasEpisodes: !!document.querySelector('.btn-ep, .episode-btn, a[href*="episode"]'),
-          hasMovieHeading: !!document.querySelector('.movie-heading')
-        };
-        console.log('Page content analysis:', JSON.stringify(pageContent));
+        const description = document.querySelector('.synopsis')?.textContent.trim() || '';
         
         const seasons = [];
+        const seasonElements = document.querySelectorAll('.season');
         
-        // Try multiple selectors for seasons
-        const seasonSelectors = ['.season', '.seasons', '.season-container', '.episodes-container'];
-        let seasonElements = [];
-        
-        for (const selector of seasonSelectors) {
-          seasonElements = document.querySelectorAll(selector);
-          if (seasonElements.length > 0) break;
-        }
-        
-        // If we found season containers
         if (seasonElements.length > 0) {
           seasonElements.forEach(seasonElement => {
-            const seasonHeading = seasonElement.querySelector('.movie-heading span, .season-title')?.textContent.trim();
-            // Try to extract season number with more flexible regex
-            const seasonMatches = seasonHeading?.match(/[Ss](?:eason)?\s*(\d+)/i) || 
-                                seasonHeading?.match(/الموسم\s*(\d+)/i);
-            const seasonNumber = seasonMatches?.[1] || '1';
+            const seasonHeading = seasonElement.querySelector('.movie-heading span')?.textContent.trim();
+            const seasonMatches = seasonHeading?.match(/S\s*(\d+)/i) || 
+                                seasonHeading?.match(/الموسم\s*(\d+)/i) ||
+                                seasonHeading?.match(/(\d+)/) || ['', '1'];
+            const seasonNumber = seasonMatches[1] || '1';
             
             const episodes = [];
-            const episodeLinks = seasonElement.querySelectorAll('a.btn-ep, a.episode-btn, a[href*="episode"]');
+            const episodeLinks = seasonElement.querySelectorAll('a.btn-ep');
             
             episodeLinks.forEach(link => {
               const episodeText = link.textContent.trim();
-              // More flexible episode number detection
-              const episodeMatches = episodeText.match(/[Ee]p(?:isode)?\s*#?\s*(\d+)/i) || 
+              const episodeMatches = episodeText.match(/Ep#(\d+)/i) || 
                                   episodeText.match(/الحلقة\s*(\d+)/i) ||
                                   episodeText.match(/(\d+)/);
               const episodeNumber = episodeMatches?.[1] || '';
@@ -472,87 +428,46 @@ class AlooTVController {
               }
             });
             
-            // Only add season if it has episodes
+            // Sort episodes by number
+            episodes.sort((a, b) => a.number - b.number);
+            
             if (episodes.length > 0) {
-              episodes.sort((a, b) => a.number - b.number);
               seasons.push({
                 number: parseInt(seasonNumber),
                 episodes
               });
+            } else {
+              // Fallback - add season with one episode pointing to show page
+              seasons.push({
+                number: parseInt(seasonNumber),
+                episodes: [{
+                  number: 1,
+                  url: window.location.href
+                }]
+              });
             }
           });
         } else {
-          // No season containers found - assume it's a single season show
-          // Look for episode links throughout the page
-          const allEpisodeLinks = document.querySelectorAll('a.btn-ep, a.episode-btn, a[href*="episode"]');
-          
-          if (allEpisodeLinks.length > 0) {
-            const episodes = [];
-            
-            allEpisodeLinks.forEach(link => {
-              const episodeText = link.textContent.trim();
-              const episodeMatches = episodeText.match(/[Ee]p(?:isode)?\s*#?\s*(\d+)/i) || 
-                                  episodeText.match(/الحلقة\s*(\d+)/i) ||
-                                  episodeText.match(/(\d+)/);
-              const episodeNumber = episodeMatches?.[1] || '1';
-              const episodeUrl = link.href;
-              
-              episodes.push({
-                number: parseInt(episodeNumber),
-                url: episodeUrl
-              });
-            });
-            
-            if (episodes.length > 0) {
-              episodes.sort((a, b) => a.number - b.number);
-              seasons.push({
-                number: 1,
-                episodes
-              });
-            }
-          } else if (document.querySelector('iframe[src*="player"], video, source[src]')) {
-            // Handle case where it's a movie without episodes
-            // Create a virtual season with a single episode
-            seasons.push({
+          // No seasons found - create default season
+          seasons.push({
+            number: 1,
+            episodes: [{
               number: 1,
-              episodes: [{
-                number: 1,
-                url: url
-              }]
-            });
-          }
+              url: window.location.href
+            }]
+          });
         }
         
         // Sort seasons by number
         seasons.sort((a, b) => a.number - b.number);
         
-        // Add fallback for when no seasons were found
-        if (seasons.length === 0) {
-          seasons.push({
-            number: 1,
-            episodes: [{
-              number: 1,
-              url: url
-            }]
-          });
-        }
-        
         return {
           title,
           image,
           description,
-          seasons,
-          debug: pageContent
+          seasons
         };
       });
-      
-      console.log(`Extracted show details for "${showDetails.title}": ${showDetails.seasons.length} seasons`);
-      if (showDetails.debug) {
-        console.log(`Debug info: ${JSON.stringify(showDetails.debug)}`);
-      }
-      
-      // Remove debug data before caching
-      delete showDetails.debug;
       
       // Cache results
       alootvCache.set(cacheKey, showDetails, 21600); // Cache for 6 hours

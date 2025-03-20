@@ -5,10 +5,14 @@ import { promisify } from 'util';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
+import NodeCache from 'node-cache';
 
 // Get the directory name of the current module
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
+
+// Create a cache for storing ShowBox results (TTL: 6 hours)
+const showboxCache = new NodeCache({ stdTTL: 21600 });
 
 const SCRAPER_API_KEY = '169e05c208dcbe5e453edd9c5957cc40';
 const UI_TOKENS = [
@@ -205,6 +209,19 @@ export const showboxController = {
     let tmdbData = null;
     const usePython = py !== undefined;
 
+    // Generate a unique cache key based on request parameters
+    const cacheKey = `showbox:${tmdbId}:${type}${season ? `:s${season}` : ''}${episode ? `:e${episode}` : ''}:${usePython ? 'py' : 'js'}`;
+    
+    // Check cache first
+    const cachedResult = showboxCache.get(cacheKey);
+    if (cachedResult) {
+      console.log(`✅ Cache hit for ${cacheKey}`);
+      return res.json({
+        ...cachedResult,
+        source: 'cache'
+      });
+    }
+
     console.log(`\n🎬 Starting ShowBox scrape for TMDB ID: ${tmdbId} [${type}]${usePython ? ' using Python scraper' : ''}`);
     
     try {
@@ -310,7 +327,7 @@ export const showboxController = {
               throw new Error('Episode not found');
             }
             
-            return res.json({
+            const responseData = {
               success: true,
               tmdb_id: tmdbId,
               type,
@@ -322,10 +339,24 @@ export const showboxController = {
               episode: parseInt(episode, 10),
               streams: targetEpisode,
               scraper: 'javascript'
-            });
+            };
+
+            // Add type-specific data to the response
+            if (type === 'tv' && useJavaScript) {
+              // TV show seasons data
+              Object.assign(responseData, { seasons });
+            } else {
+              // Movie or general streams data
+              Object.assign(responseData, { streams: targetEpisode });
+            }
+
+            // Store in cache before returning
+            showboxCache.set(cacheKey, responseData);
+
+            return res.json(responseData);
           }
 
-          return res.json({
+          const responseData = {
             success: true,
             tmdb_id: tmdbId,
             type,
@@ -335,7 +366,21 @@ export const showboxController = {
             febbox_url: febboxUrl,
             seasons,
             scraper: 'javascript'
-          });
+          };
+
+          // Add type-specific data to the response
+          if (type === 'tv' && useJavaScript) {
+            // TV show seasons data
+            Object.assign(responseData, { seasons });
+          } else {
+            // Movie or general streams data
+            Object.assign(responseData, { streams: seasons[1] });
+          }
+
+          // Store in cache before returning
+          showboxCache.set(cacheKey, responseData);
+
+          return res.json(responseData);
         } else {
           // Handle movies
           const videoFiles = files.filter(file => file.is_dir === 0);
@@ -370,7 +415,7 @@ export const showboxController = {
           throw new Error('Episode not found');
         }
 
-        return res.json({
+        const responseData = {
           success: true,
           tmdb_id: tmdbId,
           type,
@@ -382,10 +427,24 @@ export const showboxController = {
           episode: parseInt(episode),
           streams: targetEpisode,
           scraper: usePython ? 'python' : 'javascript'
-        });
+        };
+
+        // Add type-specific data to the response
+        if (type === 'tv' && useJavaScript) {
+          // TV show seasons data
+          Object.assign(responseData, { seasons });
+        } else {
+          // Movie or general streams data
+          Object.assign(responseData, { streams: targetEpisode });
+        }
+
+        // Store in cache before returning
+        showboxCache.set(cacheKey, responseData);
+
+        return res.json(responseData);
       }
 
-      return res.json({
+      const responseData = {
         success: true,
         tmdb_id: tmdbId,
         type,
@@ -395,7 +454,21 @@ export const showboxController = {
         febbox_url: febboxUrl,
         streams: streamLinks,
         scraper: usePython ? 'python' : 'javascript'
-      });
+      };
+
+      // Add type-specific data to the response
+      if (type === 'tv' && useJavaScript) {
+        // TV show seasons data
+        Object.assign(responseData, { seasons });
+      } else {
+        // Movie or general streams data
+        Object.assign(responseData, { streams: streamLinks });
+      }
+
+      // Store in cache before returning
+      showboxCache.set(cacheKey, responseData);
+
+      return res.json(responseData);
 
     } catch (error) {
       console.error('❌ ShowBox scraping failed:', {
@@ -409,6 +482,7 @@ export const showboxController = {
         scraper: usePython ? 'python' : 'javascript'
       });
       
+      // Don't cache errors
       return res.status(500).json({
         success: false,
         error: error.message,
@@ -418,5 +492,17 @@ export const showboxController = {
         scraper: usePython ? 'python' : 'javascript'
       });
     }
+  },
+
+  /**
+   * Utility method to clear the cache (can be exposed as an endpoint if needed)
+   */
+  clearCache(req, res) {
+    const cleared = showboxCache.flushAll();
+    return res.json({
+      success: true,
+      message: 'Cache cleared successfully',
+      itemsCleared: cleared
+    });
   }
 };

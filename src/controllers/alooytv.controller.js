@@ -168,7 +168,13 @@ class AlooTVController {
       if (searchResults.length === 0) {
         return res.status(404).json({
           success: false,
-          message: 'Movie not found on AlooTV'
+          message: 'Movie not found on AlooTV',
+          error_details: {
+            search_query: arabicTitle,
+            tmdb_id: tmdbId,
+            type: 'movie',
+            timestamp: new Date().toISOString()
+          }
         });
       }
       
@@ -187,13 +193,19 @@ class AlooTVController {
     } catch (error) {
       const statusCode = error.response?.status || 'No status code';
       const errorCode = error.code || 'No error code';
-      console.error(`Error getting movie from AlooTV: ${error.message}, Status: ${statusCode}, Code: ${errorCode}`);
+      const errorMessage = error.message || 'Unknown error';
+      const errorStack = error.stack || '';
+      
+      console.error(`Error getting movie from AlooTV: ${errorMessage}, Status: ${statusCode}, Code: ${errorCode}`);
+      console.error(errorStack);
+      
       return res.status(500).json({
         success: false,
         message: 'Failed to get movie from AlooTV',
-        error: error.message,
+        error: errorMessage,
         status_code: statusCode,
-        error_code: errorCode
+        error_code: errorCode,
+        error_stack: process.env.NODE_ENV === 'development' ? errorStack : undefined
       });
     }
   }
@@ -212,7 +224,12 @@ class AlooTVController {
       if (isNaN(season) || isNaN(episode)) {
         return res.status(400).json({
           success: false,
-          message: 'Season and episode numbers are required'
+          message: 'Season and episode numbers are required',
+          error_details: {
+            provided_season: req.query.season,
+            provided_episode: req.query.episode,
+            tmdb_id: tmdbId
+          }
         });
       }
       
@@ -223,12 +240,47 @@ class AlooTVController {
       const arabicTitle = tvDetails.name || tvDetails.original_name;
       
       // Search for the TV show on AlooTV
-      const searchResults = await this.search(arabicTitle);
+      let searchResults;
+      try {
+        searchResults = await this.search(arabicTitle);
+        
+        if (searchResults.length === 0) {
+          // If no results, try searching with English name as fallback
+          if (tvDetails.original_language !== 'ar' && tvDetails.original_name !== arabicTitle) {
+            console.log(`No results for Arabic name "${arabicTitle}", trying original name "${tvDetails.original_name}"`);
+            searchResults = await this.search(tvDetails.original_name);
+          }
+        }
+      } catch (searchError) {
+        const searchStatusCode = searchError.response?.status || 'No status code';
+        const searchErrorCode = searchError.code || 'No error code';
+        
+        return res.status(500).json({
+          success: false,
+          message: 'Failed to search for TV show on AlooTV',
+          error: searchError.message,
+          status_code: searchStatusCode,
+          error_code: searchErrorCode,
+          search_query: arabicTitle,
+          tmdb_id: tmdbId
+        });
+      }
       
-      if (searchResults.length === 0) {
+      if (!searchResults || searchResults.length === 0) {
         return res.status(404).json({
           success: false,
-          message: 'TV show not found on AlooTV'
+          message: 'TV show not found on AlooTV',
+          error_details: {
+            search_query: arabicTitle,
+            tmdb_id: tmdbId,
+            tmdb_title: tvDetails.name,
+            tmdb_original_title: tvDetails.original_name,
+            requested_season: season,
+            requested_episode: episode,
+            type: 'tv',
+            timestamp: new Date().toISOString(),
+            domain: await this.discoverCurrentDomain() // Include current domain for troubleshooting
+          }
         });
       }
       
@@ -236,7 +288,23 @@ class AlooTVController {
       const show = searchResults[0];
       
       // Get show details including seasons and episodes
-      const showDetails = await this.getShowDetails(show.link);
+      let showDetails;
+      try {
+        showDetails = await this.getShowDetails(show.link);
+      } catch (detailsError) {
+        const detailsStatusCode = detailsError.response?.status || 'No status code';
+        const detailsErrorCode = detailsError.code || 'No error code';
+        
+        return res.status(500).json({
+          success: false,
+          message: 'Failed to get TV show details from AlooTV',
+          error: detailsError.message,
+          status_code: detailsStatusCode,
+          error_code: detailsErrorCode,
+          show_url: show.link,
+          show_title: show.title
+        });
+      }
       
       // Find the requested season
       const targetSeason = showDetails.seasons.find(s => s.number === season);
@@ -244,7 +312,13 @@ class AlooTVController {
       if (!targetSeason) {
         return res.status(404).json({
           success: false,
-          message: `Season ${season} not found`
+          message: `Season ${season} not found`,
+          error_details: {
+            available_seasons: showDetails.seasons.map(s => s.number),
+            requested_season: season,
+            show_title: showDetails.title,
+            show_url: show.link
+          }
         });
       }
       
@@ -254,12 +328,33 @@ class AlooTVController {
       if (!targetEpisode) {
         return res.status(404).json({
           success: false,
-          message: `Episode ${episode} not found in season ${season}`
+          message: `Episode ${episode} not found in season ${season}`,
+          error_details: {
+            available_episodes: targetSeason.episodes.map(e => e.number),
+            requested_episode: episode,
+            requested_season: season,
+            show_title: showDetails.title
+          }
         });
       }
       
       // Get player URL for the episode
-      const playerUrl = await this.getEpisodePlayerUrl(targetEpisode.url);
+      let playerUrl;
+      try {
+        playerUrl = await this.getEpisodePlayerUrl(targetEpisode.url);
+      } catch (playerError) {
+        const playerStatusCode = playerError.response?.status || 'No status code';
+        const playerErrorCode = playerError.code || 'No error code';
+        
+        return res.status(500).json({
+          success: false,
+          message: 'Failed to get episode player URL',
+          error: playerError.message,
+          status_code: playerStatusCode,
+          error_code: playerErrorCode,
+          episode_url: targetEpisode.url
+        });
+      }
       
       return res.json({
         success: true,
@@ -270,13 +365,24 @@ class AlooTVController {
     } catch (error) {
       const statusCode = error.response?.status || 'No status code';
       const errorCode = error.code || 'No error code';
-      console.error(`Error getting TV episode from AlooTV: ${error.message}, Status: ${statusCode}, Code: ${errorCode}`);
+      const errorMessage = error.message || 'Unknown error';
+      const errorStack = error.stack || '';
+      
+      console.error(`Error getting TV episode from AlooTV: ${errorMessage}, Status: ${statusCode}, Code: ${errorCode}`);
+      console.error(errorStack);
+      
       return res.status(500).json({
         success: false,
         message: 'Failed to get TV episode from AlooTV',
-        error: error.message,
+        error: errorMessage,
         status_code: statusCode,
-        error_code: errorCode
+        error_code: errorCode,
+        error_stack: process.env.NODE_ENV === 'development' ? errorStack : undefined,
+        request_params: {
+          tmdb_id: req.params.tmdbId,
+          season: req.query.season,
+          episode: req.query.episode
+        }
       });
     }
   }
@@ -328,8 +434,6 @@ class AlooTVController {
    * @returns {Promise<Array>} - List of shows matching the query
    */
   async search(query) {
-    const domain = await this.discoverCurrentDomain();
-    const searchUrl = `${domain}/search?q=${encodeURIComponent(query)}`;
     const cacheKey = `alootv_search_${query}`;
     
     const cachedResults = alootvCache.get(cacheKey);
@@ -337,9 +441,23 @@ class AlooTVController {
       return cachedResults;
     }
     
+    let domain;
     try {
-      const browser = await this.getBrowser();
-      const page = await browser.newPage();
+      domain = await this.discoverCurrentDomain();
+    } catch (domainError) {
+      const statusCode = domainError.response?.status || 'No status code';
+      const errorCode = domainError.code || 'No error code';
+      console.error(`Failed to get domain: ${domainError.message}, Status: ${statusCode}, Code: ${errorCode}`);
+      throw new Error(`Domain discovery failed: ${domainError.message}, Status: ${statusCode}, Code: ${errorCode}`);
+    }
+    
+    const searchUrl = `${domain}/search?q=${encodeURIComponent(query)}`;
+    console.log(`Searching AlooTV: ${searchUrl}`);
+    
+    let browser, page;
+    try {
+      browser = await this.getBrowser();
+      page = await browser.newPage();
       
       // Optimize page for speed
       await page.setRequestInterception(true);
@@ -357,16 +475,29 @@ class AlooTVController {
       await this.applyEnhancedPageHeaders(page);
       await page.setDefaultNavigationTimeout(20000);
       
+      console.log(`Navigating to: ${searchUrl}`);
+      
       // Navigate to search page with faster load strategy
-      await page.goto(searchUrl, { 
+      const response = await page.goto(searchUrl, { 
         waitUntil: 'domcontentloaded', 
         timeout: 20000 
       });
+      
+      if (!response.ok()) {
+        const status = response.status();
+        throw new Error(`Search page returned status ${status} (${response.statusText()})`);
+      }
       
       // Extract search results
       const searchResults = await page.evaluate(() => {
         const shows = [];
         const movieContainers = document.querySelectorAll('.movie-container .col-md-2');
+        
+        if (movieContainers.length === 0) {
+          // Log detailed page structure for debugging if no results found
+          const pageContent = document.body.innerHTML;
+          console.log('Page content:', pageContent.substring(0, 500) + '...');
+        }
         
         movieContainers.forEach(container => {
           const titleElement = container.querySelector('.movie-title h3 a');
@@ -400,8 +531,24 @@ class AlooTVController {
     } catch (error) {
       const statusCode = error.response?.status || 'No status code';
       const errorCode = error.code || 'No error code';
-      console.error(`Error searching AlooTV: ${error.message}, Status: ${statusCode}, Code: ${errorCode}`);
-      throw error;
+      
+      // Capture page content on error if page is available
+      let pageContent = 'Not available';
+      if (page) {
+        try {
+          pageContent = await page.content();
+          pageContent = pageContent.substring(0, 500) + '...'; // Trim for log
+        } catch (contentError) {
+          pageContent = 'Failed to capture: ' + contentError.message;
+        }
+      }
+      
+      console.error(`Error searching AlooTV (${searchUrl}): ${error.message}, Status: ${statusCode}, Code: ${errorCode}`);
+      console.error(`Page content sample: ${pageContent}`);
+      
+      if (page) await page.close().catch(() => {});
+      
+      throw new Error(`Search failed for "${query}": ${error.message}, Status: ${statusCode}, Code: ${errorCode}`);
     }
   }
 

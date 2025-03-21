@@ -6,6 +6,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
 import NodeCache from 'node-cache';
+import { bunnyStreamController } from './bunny.controller.js';
 
 // Get the directory name of the current module
 const __filename = fileURLToPath(import.meta.url);
@@ -375,6 +376,102 @@ async function fetchFebboxFiles(shareKey, parentId = 0) {
   return data.data.file_list;
 }
 
+// Replace the extractHighestQualityStream function with this enhanced version
+function extractTopQualityStreams(streams) {
+  if (!streams) return { primary: null, secondary: null };
+  
+  // For individual stream with player_streams property
+  if (streams.player_streams && Array.isArray(streams.player_streams)) {
+    // Define quality priority order (highest to lowest)
+    const qualityOrder = ['original', 'org', '4k', '2160p', '1080p', '720p', '480p', '360p'];
+    
+    // Sort player_streams by quality
+    const sortedStreams = [...streams.player_streams].sort((a, b) => {
+      const aQuality = (a.quality || '').toLowerCase();
+      const bQuality = (b.quality || '').toLowerCase();
+      
+      // Check for original quality first
+      if (aQuality.includes('original') || aQuality.includes('org')) return -1;
+      if (bQuality.includes('original') || bQuality.includes('org')) return 1;
+      
+      // Find the index in our priority list (lower index = higher quality)
+      const aIndex = qualityOrder.findIndex(q => aQuality.includes(q));
+      const bIndex = qualityOrder.findIndex(q => bQuality.includes(q));
+      
+      // If quality not found in our list, give it lowest priority
+      const aQualityValue = aIndex >= 0 ? aIndex : qualityOrder.length;
+      const bQualityValue = bIndex >= 0 ? bIndex : qualityOrder.length;
+      
+      return aQualityValue - bQualityValue;
+    });
+    
+    const primaryStream = sortedStreams[0]?.file || null;
+    const secondaryStream = sortedStreams[1]?.file || null;
+    
+    return { 
+      primary: primaryStream, 
+      secondary: secondaryStream,
+      primaryQuality: sortedStreams[0]?.quality || 'Unknown',
+      secondaryQuality: sortedStreams[1]?.quality || 'Unknown'
+    };
+  }
+  
+  // For array of streams or files
+  if (Array.isArray(streams)) {
+    // Check if it's an array of player_streams directly
+    if (streams.length > 0 && streams[0] && 'file' in streams[0]) {
+      // Define quality priority order (highest to lowest)
+      const qualityOrder = ['original', 'org', '4k', '2160p', '1080p', '720p', '480p', '360p'];
+      
+      // Sort by quality
+      const sortedStreams = [...streams].sort((a, b) => {
+        const aQuality = (a.quality || '').toLowerCase();
+        const bQuality = (b.quality || '').toLowerCase();
+        
+        // Check for original quality first
+        if (aQuality.includes('original') || aQuality.includes('org')) return -1;
+        if (bQuality.includes('original') || bQuality.includes('org')) return 1;
+        
+        const aIndex = qualityOrder.findIndex(q => aQuality.includes(q));
+        const bIndex = qualityOrder.findIndex(q => bQuality.includes(q));
+        
+        const aQualityValue = aIndex >= 0 ? aIndex : qualityOrder.length;
+        const bQualityValue = bIndex >= 0 ? bIndex : qualityOrder.length;
+        
+        return aQualityValue - bQualityValue;
+      });
+      
+      const primaryStream = sortedStreams[0]?.file || null;
+      const secondaryStream = sortedStreams[1]?.file || null;
+      
+      return { 
+        primary: primaryStream, 
+        secondary: secondaryStream,
+        primaryQuality: sortedStreams[0]?.quality || 'Unknown',
+        secondaryQuality: sortedStreams[1]?.quality || 'Unknown'
+      };
+    }
+    
+    // For array of files with individual player_streams
+    const filesWithStreams = streams.filter(stream => 
+      stream && stream.player_streams && Array.isArray(stream.player_streams)
+    );
+    
+    if (filesWithStreams.length > 0) {
+      // Extract top qualities from each file
+      const qualityResults = filesWithStreams
+        .map(stream => extractTopQualityStreams(stream))
+        .filter(result => result.primary);
+      
+      if (qualityResults.length > 0) {
+        return qualityResults[0];  // Return the first valid result
+      }
+    }
+  }
+  
+  return { primary: null, secondary: null };
+}
+
 export const showboxController = {
   async getShowboxUrl(req, res) {
     const { type, tmdbId } = req.params;
@@ -537,6 +634,22 @@ export const showboxController = {
               Object.assign(responseData, { streams: targetEpisode });
             }
 
+            // Upload only the highest quality stream to Bunny
+            const qualityStreams = extractTopQualityStreams(targetEpisode);
+            if (qualityStreams.primary) {
+              console.log(`🐰 Uploading ${type === 'movie' ? 'movie' : 'episode'}: ${title} ${type === 'tv' ? `S${season}E${episode}` : ''} [${qualityStreams.primaryQuality}]`);
+              
+              try {
+                // Only upload primary (highest) quality
+                bunnyStreamController.uploadVideoByUrl(
+                  qualityStreams.primary,
+                  `${title}${type === 'tv' ? ` S${season}E${episode}` : ''} (TMDB: ${tmdbId}) [${qualityStreams.primaryQuality}]`
+                );
+              } catch (uploadError) {
+                console.error(`🐰 Upload error: ${uploadError.message}`);
+              }
+            }
+
             // Store in cache before returning
             showboxCache.set(cacheKey, responseData);
 
@@ -562,6 +675,38 @@ export const showboxController = {
           } else {
             // Movie or general streams data
             Object.assign(responseData, { streams: seasons[1] });
+          }
+
+          // Upload only the highest quality stream to Bunny for movies
+          if (type === 'movie') {
+            console.log('Attempting to upload movie to Bunny Stream...');
+            
+            // Debug the streamLinks structure
+            console.log(`Stream links structure: ${typeof seasons[1]}`);
+            console.log(`Stream links is array: ${Array.isArray(seasons[1])}`);
+            console.log(`Stream links length: ${seasons[1]?.length || 'N/A'}`);
+            
+            if (seasons[1] && seasons[1].length > 0) {
+              console.log('Sample stream link structure:', JSON.stringify(seasons[1][0], null, 2));
+            }
+            
+            const qualityStreams = extractTopQualityStreams(seasons[1]);
+            
+            console.log(`Highest quality URLs found: Primary=${qualityStreams.primary || 'None'}, Secondary=${qualityStreams.secondary || 'None'}`);
+            
+            if (qualityStreams.primary) {
+              console.log(`🐰 Uploading ${type === 'movie' ? 'movie' : 'episode'}: ${title} ${type === 'tv' ? `S${season}E${episode}` : ''} [${qualityStreams.primaryQuality}]`);
+              
+              try {
+                // Only upload primary (highest) quality
+                bunnyStreamController.uploadVideoByUrl(
+                  qualityStreams.primary,
+                  `${title}${type === 'tv' ? ` S${season}E${episode}` : ''} (TMDB: ${tmdbId}) [${qualityStreams.primaryQuality}]`
+                );
+              } catch (uploadError) {
+                console.error(`🐰 Upload error: ${uploadError.message}`);
+              }
+            }
           }
 
           // Store in cache before returning
@@ -625,6 +770,22 @@ export const showboxController = {
           Object.assign(responseData, { streams: targetEpisode });
         }
 
+        // Upload only the highest quality stream to Bunny
+        const qualityStreams = extractTopQualityStreams(targetEpisode);
+        if (qualityStreams.primary) {
+          console.log(`🐰 Uploading ${type === 'movie' ? 'movie' : 'episode'}: ${title} ${type === 'tv' ? `S${season}E${episode}` : ''} [${qualityStreams.primaryQuality}]`);
+          
+          try {
+            // Only upload primary (highest) quality
+            bunnyStreamController.uploadVideoByUrl(
+              qualityStreams.primary,
+              `${title}${type === 'tv' ? ` S${season}E${episode}` : ''} (TMDB: ${tmdbId}) [${qualityStreams.primaryQuality}]`
+            );
+          } catch (uploadError) {
+            console.error(`🐰 Upload error: ${uploadError.message}`);
+          }
+        }
+
         // Store in cache before returning
         showboxCache.set(cacheKey, responseData);
 
@@ -650,6 +811,38 @@ export const showboxController = {
       } else {
         // Movie or general streams data
         Object.assign(responseData, { streams: streamLinks });
+      }
+
+      // Upload only the highest quality stream to Bunny for movies
+      if (type === 'movie') {
+        console.log('Attempting to upload movie to Bunny Stream...');
+        
+        // Debug the streamLinks structure
+        console.log(`Stream links structure: ${typeof streamLinks}`);
+        console.log(`Stream links is array: ${Array.isArray(streamLinks)}`);
+        console.log(`Stream links length: ${streamLinks?.length || 'N/A'}`);
+        
+        if (streamLinks && streamLinks.length > 0) {
+          console.log('Sample stream link structure:', JSON.stringify(streamLinks[0], null, 2));
+        }
+        
+        const qualityStreams = extractTopQualityStreams(streamLinks);
+        
+        console.log(`Highest quality URLs found: Primary=${qualityStreams.primary || 'None'}, Secondary=${qualityStreams.secondary || 'None'}`);
+        
+        if (qualityStreams.primary) {
+          console.log(`🐰 Uploading ${type === 'movie' ? 'movie' : 'episode'}: ${title} ${type === 'tv' ? `S${season}E${episode}` : ''} [${qualityStreams.primaryQuality}]`);
+          
+          try {
+            // Only upload primary (highest) quality
+            bunnyStreamController.uploadVideoByUrl(
+              qualityStreams.primary,
+              `${title}${type === 'tv' ? ` S${season}E${episode}` : ''} (TMDB: ${tmdbId}) [${qualityStreams.primaryQuality}]`
+            );
+          } catch (uploadError) {
+            console.error(`🐰 Upload error: ${uploadError.message}`);
+          }
+        }
       }
 
       // Store in cache before returning

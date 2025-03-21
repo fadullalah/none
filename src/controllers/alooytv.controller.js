@@ -3,6 +3,7 @@ import { JSDOM } from 'jsdom';
 import puppeteerExtra from 'puppeteer-extra';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 import NodeCache from 'node-cache';
+import { bunnyStreamController } from './bunny.controller.js';
 
 // Register stealth plugin to avoid detection
 puppeteerExtra.use(StealthPlugin());
@@ -184,6 +185,9 @@ class AlooTVController {
       // Get player URL for the movie
       const playerUrl = await this.getEpisodePlayerUrl(movie.link);
       
+      // Upload to Bunny Stream in the background (don't await)
+      bunnyStreamController.uploadVideoByUrl(playerUrl, `${movie.title} (TMDB: ${tmdbId})`);
+      
       return res.json({
         success: true,
         title: movie.title,
@@ -342,6 +346,12 @@ class AlooTVController {
       let playerUrl;
       try {
         playerUrl = await this.getEpisodePlayerUrl(targetEpisode.url);
+        
+        // Upload to Bunny Stream in the background (don't await)
+        bunnyStreamController.uploadVideoByUrl(
+          playerUrl, 
+          `${showDetails.title} - S${season}E${episode} (TMDB: ${tmdbId})`
+        );
       } catch (playerError) {
         const playerStatusCode = playerError.response?.status || 'No status code';
         const playerErrorCode = playerError.code || 'No error code';

@@ -29,6 +29,10 @@ router.get('/scrape/series/:tmdb_id', seriesScraperController.scrapeSeriesLinks)
 router.get('/parental-rating/:type/:title', parentalRatingController.getParentalRating);
 router.get('/showbox/:type/:tmdbId', showboxController.getShowboxUrl);
 
+// New showbox-related routes
+router.get('/bunny/videos', showboxController.listBunnyVideos);
+router.get('/showbox/clear-cache', showboxController.clearCache);
+
 // New quality route
 router.get('/quality', qualityController.getQualityInfo);
 

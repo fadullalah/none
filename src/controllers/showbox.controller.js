@@ -27,6 +27,64 @@ const UI_TOKENS = [
 'eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpYXQiOjE3NDI1NjQxNDAsIm5iZiI6MTc0MjU2NDE0MCwiZXhwIjoxNzczNjY4MTYwLCJkYXRhIjp7InVpZCI6NjIzMzkxLCJ0b2tlbiI6IjQ0NGQ3ZjFhZTI1YzJkYjU2MjkwYWJhMWNmZWNjMzdjIn19.GjtPfpZP2mSXGc43ZMmO_tK5BS6AYFMbHT4f_rN1E9I'
 ];
 
+// Define quality priority order
+const QUALITY_PRIORITY = [
+  '4K HDR', '4K', 'ORIGINAL', '1080P', '720P', '480P', '360P'
+];
+
+// Helper function to prioritize sources based on quality
+const getBestQualitySource = (sources) => {
+  if (!sources || !Array.isArray(sources) || sources.length === 0) {
+    return null;
+  }
+
+  // First check for specific quality labels
+  for (const quality of QUALITY_PRIORITY) {
+    const source = sources.find(src => 
+      src.quality && src.quality.toUpperCase().includes(quality)
+    );
+    if (source) return source;
+  }
+
+  // If no specific quality found, try to determine from resolution or file size
+  sources.sort((a, b) => {
+    // Try to extract resolution height if present in the quality string
+    const getHeight = (src) => {
+      if (!src.quality) return 0;
+      const match = src.quality.match(/(\d+)[pP]/);
+      return match ? parseInt(match[1], 10) : 0;
+    };
+
+    const heightA = getHeight(a);
+    const heightB = getHeight(b);
+
+    // If we found heights for both, compare them
+    if (heightA && heightB) {
+      return heightB - heightA; // Higher resolution first
+    }
+
+    // Otherwise default to first source
+    return 0;
+  });
+
+  return sources[0];
+};
+
+// Helper to generate a consistent title format for Bunny CDN
+const generateVideoTitle = (type, tmdbId, title, season = null, episode = null, quality = null) => {
+  let videoTitle = `${type}_${tmdbId}_${title.replace(/[^\w\s]/gi, '')}`;
+  
+  if (type === 'tv' && season !== null && episode !== null) {
+    videoTitle += `_S${season.toString().padStart(2, '0')}E${episode.toString().padStart(2, '0')}`;
+  }
+  
+  if (quality) {
+    videoTitle += `_${quality}`;
+  }
+  
+  return videoTitle.replace(/\s+/g, '_').substring(0, 100); // Ensure title isn't too long
+};
+
 function getScraperUrl(url) {
   return `http://api.scraperapi.com?api_key=${SCRAPER_API_KEY}&url=${encodeURIComponent(url)}`;
 }
@@ -884,5 +942,34 @@ export const showboxController = {
       message: 'Cache cleared successfully',
       itemsCleared: cleared
     });
+  },
+  
+  /**
+   * List all videos in Bunny CDN
+   */
+  async listBunnyVideos(req, res) {
+    try {
+      await bunnyStreamController.initialize();
+      const videos = bunnyStreamController.allVideos;
+      
+      return res.json({
+        success: true,
+        total: videos.length,
+        videos: videos.map(v => ({
+          id: v.guid,
+          title: v.title,
+          status: v.status,
+          created: v.dateUploaded,
+          length: v.length,
+          views: v.views,
+          url: v.directPlayUrl
+        }))
+      });
+    } catch (error) {
+      return res.status(500).json({
+        success: false,
+        error: error.message
+      });
+    }
   }
 };

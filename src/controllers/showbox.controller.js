@@ -7,6 +7,8 @@ import { fileURLToPath } from 'url';
 import { dirname } from 'path';
 import NodeCache from 'node-cache';
 import { bunnyStreamController } from './bunny.controller.js';
+import axios from 'axios';
+import fs from 'fs';
 
 // Get the directory name of the current module
 const __filename = fileURLToPath(import.meta.url);
@@ -18,6 +20,14 @@ const showboxCache = new NodeCache({ stdTTL: 21600 });
 // Add these near the top with other cache declarations
 const imdbCache = new NodeCache({ stdTTL: 86400 }); // 24 hours
 const urlCache = new NodeCache({ stdTTL: 43200 }); // 12 hours
+
+// Path to our JSON database file
+const CONTENT_DB_PATH = path.join(__dirname, '../../data/uploaded_content.json');
+
+// Quality priority (highest to lowest)
+const QUALITY_PRIORITY = [
+  '4K HDR', '4K', 'ORIGINAL', '1080P HDR', '1080P', '720P', '480P', '360P'
+];
 
 const SCRAPER_API_KEY = '169e05c208dcbe5e453edd9c5957cc40';
 const UI_TOKENS = [
@@ -472,417 +482,321 @@ function extractTopQualityStreams(streams) {
   return { primary: null, secondary: null };
 }
 
-export const showboxController = {
-  async getShowboxUrl(req, res) {
-    const { type, tmdbId } = req.params;
-    const { season, episode, py } = req.query;
-    let showboxId = null;
-    let tmdbData = null;
-    const usePython = py !== undefined;
-
-    // Generate a unique cache key based on request parameters
-    const cacheKey = `showbox:${tmdbId}:${type}${season ? `:s${season}` : ''}${episode ? `:e${episode}` : ''}:${usePython ? 'py' : 'js'}`;
-    
-    // Check cache first
-    const cachedResult = showboxCache.get(cacheKey);
-    if (cachedResult) {
-      console.log(`✅ Cache hit for ${cacheKey}`);
-      return res.json({
-        ...cachedResult,
-        source: 'cache'
-      });
-    }
-
-    console.log(`\n🎬 Starting ShowBox scrape for TMDB ID: ${tmdbId} [${type}]${usePython ? ' using Python scraper' : ''}`);
-    
-    try {
-      const tmdbResponse = await fetch(
-        `https://api.themoviedb.org/3/${type}/${tmdbId}?api_key=${process.env.API_TOKEN}`
-      );
-      tmdbData = await tmdbResponse.json();
-      
-      const title = tmdbData.title || tmdbData.name;
-      const year = new Date(tmdbData.release_date || tmdbData.first_air_date).getFullYear();
-      
-      showboxId = await tryUrlBasedId(title, year, type);
-      
-      if (!showboxId) {
-        console.log('⚠️ Falling back to search method...');
-        const searchResult = await searchShowboxByTitle(title, type, year);
-        if (!searchResult?.id) {
-          throw new Error('Content not found on ShowBox');
-        }
-        showboxId = searchResult.id;
-      }
-
-      const febboxUrl = await getFebboxShareLink(showboxId, type);
-      const shareKey = febboxUrl.split('/share/')[1];
-
-      let streamLinks = [];
-      let useJavaScript = false;
-
-      if (usePython) {
-        console.log('🐍 Using Python scraper for:', febboxUrl);
-        try {
-          const randomToken = UI_TOKENS[Math.floor(Math.random() * UI_TOKENS.length)];
-          const pythonResults = await getPythonScrapedLinks(febboxUrl, randomToken);
-          console.log('✅ Python scraper results received');
-          
-          if (!pythonResults || !Array.isArray(pythonResults)) {
-            throw new Error('Invalid Python scraper results');
-          }
-
-          streamLinks = pythonResults.map(result => ({
-            filename: result.file_info.name,
-            quality: result.file_info.type,
-            size: result.file_info.size,
-            player_streams: Object.entries(result.quality_urls).map(([quality, url]) => ({
-              file: url,
-              quality,
-              type: 'mp4'
-            }))
-          }));
-        } catch (pythonError) {
-          console.error('❌ Python scraper failed:', pythonError);
-          useJavaScript = true;
-        }
-      } else {
-        useJavaScript = true;
-      }
-
-      if (useJavaScript) {
-        console.log('🟨 Using JavaScript scraper');
-        const files = await fetchFebboxFiles(shareKey);
-        
-        if (type === 'tv') {
-          const seasons = {};
-          const seasonFolders = files.filter(file => 
-            file.is_dir === 1 && file.file_name.toLowerCase().includes('season')
-          );
-
-          // If specific season and episode are requested, only process that season
-          if (season) {
-            const targetSeasonFolder = seasonFolders.find(folder => {
-              const seasonNum = parseInt(folder.file_name.match(/\d+/)?.[0] || '0', 10);
-              return seasonNum === parseInt(season, 10);
-            });
-
-            if (targetSeasonFolder) {
-              const episodeFiles = await fetchFebboxFiles(shareKey, targetSeasonFolder.fid);
-              const seasonEpisodes = await Promise.all(episodeFiles.map(async (episodeFile) => {
-                const ext = episodeFile.file_name.split('.').pop().toLowerCase();
-                const episodeNumber = parseInt(episodeFile.file_name.match(/E(\d+)/i)?.[1] || '0', 10);
-                
-                // If specific episode is requested, only process that episode
-                if (episode && episodeNumber !== parseInt(episode, 10)) {
-                  return null;
-                }
-
-                const qualityMatch = episodeFile.file_name.match(/(1080p|720p|480p|360p|2160p|4k)/i);
-                const playerSources = await getStreamLinks(episodeFile.fid);
-
-                return {
-                  episode: episodeNumber,
-                  filename: episodeFile.file_name,
-                  quality: qualityMatch ? qualityMatch[1] : 'Unknown',
-                  type: ext,
-                  size: episodeFile.file_size,
-                  player_streams: playerSources,
-                  direct_download: `https://www.febbox.com/file/download_share?fid=${episodeFile.fid}&share_key=${shareKey}`
-                };
-              }));
-
-              // Filter out null values and only keep the requested episode
-              const filteredEpisodes = seasonEpisodes.filter(e => e !== null);
-              if (filteredEpisodes.length > 0) {
-                seasons[parseInt(season, 10)] = filteredEpisodes;
-              }
-            }
-          }
-
-          if (season && episode) {
-            const targetSeason = seasons[parseInt(season, 10)];
-            if (!targetSeason) {
-              throw new Error('Season not found');
-            }
-            
-            const targetEpisode = targetSeason.find(e => e.episode === parseInt(episode, 10));
-            if (!targetEpisode) {
-              throw new Error('Episode not found');
-            }
-            
-            const responseData = {
-              success: true,
-              tmdb_id: tmdbId,
-              type,
-              title,
-              year,
-              showbox_id: showboxId,
-              febbox_url: febboxUrl,
-              season: parseInt(season, 10),
-              episode: parseInt(episode, 10),
-              streams: targetEpisode,
-              scraper: 'javascript'
-            };
-
-            // Add type-specific data to the response
-            if (type === 'tv' && useJavaScript) {
-              // TV show seasons data
-              Object.assign(responseData, { seasons });
-            } else {
-              // Movie or general streams data
-              Object.assign(responseData, { streams: targetEpisode });
-            }
-
-            // Upload only the highest quality stream to Bunny
-            const qualityStreams = extractTopQualityStreams(targetEpisode);
-            if (qualityStreams.primary) {
-              console.log(`🐰 Uploading ${type === 'movie' ? 'movie' : 'episode'}: ${title} ${type === 'tv' ? `S${season}E${episode}` : ''} [${qualityStreams.primaryQuality}]`);
-              
-              try {
-                // Only upload primary (highest) quality
-                bunnyStreamController.uploadVideoByUrl(
-                  qualityStreams.primary,
-                  `${title}${type === 'tv' ? ` S${season}E${episode}` : ''} (TMDB: ${tmdbId}) [${qualityStreams.primaryQuality}]`
-                );
-              } catch (uploadError) {
-                console.error(`🐰 Upload error: ${uploadError.message}`);
-              }
-            }
-
-            // Store in cache before returning
-            showboxCache.set(cacheKey, responseData);
-
-            return res.json(responseData);
-          }
-
-          const responseData = {
-            success: true,
-            tmdb_id: tmdbId,
-            type,
-            title,
-            year,
-            showbox_id: showboxId,
-            febbox_url: febboxUrl,
-            seasons,
-            scraper: 'javascript'
-          };
-
-          // Add type-specific data to the response
-          if (type === 'tv' && useJavaScript) {
-            // TV show seasons data
-            Object.assign(responseData, { seasons });
-          } else {
-            // Movie or general streams data
-            Object.assign(responseData, { streams: seasons[1] });
-          }
-
-          // Upload only the highest quality stream to Bunny for movies
-          if (type === 'movie') {
-            console.log('Attempting to upload movie to Bunny Stream...');
-            
-            // Debug the streamLinks structure
-            console.log(`Stream links structure: ${typeof seasons[1]}`);
-            console.log(`Stream links is array: ${Array.isArray(seasons[1])}`);
-            console.log(`Stream links length: ${seasons[1]?.length || 'N/A'}`);
-            
-            if (seasons[1] && seasons[1].length > 0) {
-              console.log('Sample stream link structure:', JSON.stringify(seasons[1][0], null, 2));
-            }
-            
-            const qualityStreams = extractTopQualityStreams(seasons[1]);
-            
-            console.log(`Highest quality URLs found: Primary=${qualityStreams.primary || 'None'}, Secondary=${qualityStreams.secondary || 'None'}`);
-            
-            if (qualityStreams.primary) {
-              console.log(`🐰 Uploading ${type === 'movie' ? 'movie' : 'episode'}: ${title} ${type === 'tv' ? `S${season}E${episode}` : ''} [${qualityStreams.primaryQuality}]`);
-              
-              try {
-                // Only upload primary (highest) quality
-                bunnyStreamController.uploadVideoByUrl(
-                  qualityStreams.primary,
-                  `${title}${type === 'tv' ? ` S${season}E${episode}` : ''} (TMDB: ${tmdbId}) [${qualityStreams.primaryQuality}]`
-                );
-              } catch (uploadError) {
-                console.error(`🐰 Upload error: ${uploadError.message}`);
-              }
-            }
-          }
-
-          // Store in cache before returning
-          showboxCache.set(cacheKey, responseData);
-
-          return res.json(responseData);
-        } else {
-          // Handle movies
-          const videoFiles = files.filter(file => file.is_dir === 0);
-          streamLinks = await Promise.all(videoFiles.map(async (file) => {
-            const ext = file.file_name.split('.').pop().toLowerCase();
-            const qualityMatch = file.file_name.match(/(1080p|720p|480p|360p|2160p|4k)/i);
-            const playerSources = await getStreamLinks(file.fid);
-            
-            return {
-              filename: file.file_name,
-              quality: qualityMatch ? qualityMatch[1] : 'Unknown',
-              type: ext,
-              size: file.file_size,
-              player_streams: playerSources,
-              direct_download: `https://www.febbox.com/file/download_share?fid=${file.fid}&share_key=${shareKey}`
-            };
-          }));
-        }
-      }
-
-      // Return results
-      if (type === 'tv' && season && episode && streamLinks.length > 0) {
-        const targetEpisode = streamLinks.find(link => {
-          const seasonMatch = link.filename.match(/S(\d+)/i);
-          const episodeMatch = link.filename.match(/E(\d+)/i);
-          return seasonMatch && episodeMatch && 
-                 parseInt(seasonMatch[1]) === parseInt(season) &&
-                 parseInt(episodeMatch[1]) === parseInt(episode);
-        });
-
-        if (!targetEpisode) {
-          throw new Error('Episode not found');
-        }
-
-        const responseData = {
-          success: true,
-          tmdb_id: tmdbId,
-          type,
-          title,
-          year,
-          showbox_id: showboxId,
-          febbox_url: febboxUrl,
-          season: parseInt(season),
-          episode: parseInt(episode),
-          streams: targetEpisode,
-          scraper: usePython ? 'python' : 'javascript'
-        };
-
-        // Add type-specific data to the response
-        if (type === 'tv' && useJavaScript) {
-          // TV show seasons data
-          Object.assign(responseData, { seasons });
-        } else {
-          // Movie or general streams data
-          Object.assign(responseData, { streams: targetEpisode });
-        }
-
-        // Upload only the highest quality stream to Bunny
-        const qualityStreams = extractTopQualityStreams(targetEpisode);
-        if (qualityStreams.primary) {
-          console.log(`🐰 Uploading ${type === 'movie' ? 'movie' : 'episode'}: ${title} ${type === 'tv' ? `S${season}E${episode}` : ''} [${qualityStreams.primaryQuality}]`);
-          
-          try {
-            // Only upload primary (highest) quality
-            bunnyStreamController.uploadVideoByUrl(
-              qualityStreams.primary,
-              `${title}${type === 'tv' ? ` S${season}E${episode}` : ''} (TMDB: ${tmdbId}) [${qualityStreams.primaryQuality}]`
-            );
-          } catch (uploadError) {
-            console.error(`🐰 Upload error: ${uploadError.message}`);
-          }
-        }
-
-        // Store in cache before returning
-        showboxCache.set(cacheKey, responseData);
-
-        return res.json(responseData);
-      }
-
-      const responseData = {
-        success: true,
-        tmdb_id: tmdbId,
-        type,
-        title,
-        year,
-        showbox_id: showboxId,
-        febbox_url: febboxUrl,
-        streams: streamLinks,
-        scraper: usePython ? 'python' : 'javascript'
-      };
-
-      // Add type-specific data to the response
-      if (type === 'tv' && useJavaScript) {
-        // TV show seasons data
-        Object.assign(responseData, { seasons });
-      } else {
-        // Movie or general streams data
-        Object.assign(responseData, { streams: streamLinks });
-      }
-
-      // Upload only the highest quality stream to Bunny for movies
-      if (type === 'movie') {
-        console.log('Attempting to upload movie to Bunny Stream...');
-        
-        // Debug the streamLinks structure
-        console.log(`Stream links structure: ${typeof streamLinks}`);
-        console.log(`Stream links is array: ${Array.isArray(streamLinks)}`);
-        console.log(`Stream links length: ${streamLinks?.length || 'N/A'}`);
-        
-        if (streamLinks && streamLinks.length > 0) {
-          console.log('Sample stream link structure:', JSON.stringify(streamLinks[0], null, 2));
-        }
-        
-        const qualityStreams = extractTopQualityStreams(streamLinks);
-        
-        console.log(`Highest quality URLs found: Primary=${qualityStreams.primary || 'None'}, Secondary=${qualityStreams.secondary || 'None'}`);
-        
-        if (qualityStreams.primary) {
-          console.log(`🐰 Uploading ${type === 'movie' ? 'movie' : 'episode'}: ${title} ${type === 'tv' ? `S${season}E${episode}` : ''} [${qualityStreams.primaryQuality}]`);
-          
-          try {
-            // Only upload primary (highest) quality
-            bunnyStreamController.uploadVideoByUrl(
-              qualityStreams.primary,
-              `${title}${type === 'tv' ? ` S${season}E${episode}` : ''} (TMDB: ${tmdbId}) [${qualityStreams.primaryQuality}]`
-            );
-          } catch (uploadError) {
-            console.error(`🐰 Upload error: ${uploadError.message}`);
-          }
-        }
-      }
-
-      // Store in cache before returning
-      showboxCache.set(cacheKey, responseData);
-
-      return res.json(responseData);
-
-    } catch (error) {
-      console.error('❌ ShowBox scraping failed:', {
-        error: error.message,
-        stack: error.stack,
-        tmdbId,
-        type,
-        showboxId,
-        title: tmdbData?.title || tmdbData?.name || 'Unknown',
-        year: tmdbData?.release_date || tmdbData?.first_air_date || 'Unknown',
-        scraper: usePython ? 'python' : 'javascript'
-      });
-      
-      // Don't cache errors
-      return res.status(500).json({
-        success: false,
-        error: error.message,
-        tmdb_id: tmdbId,
-        type,
-        showbox_id: showboxId,
-        scraper: usePython ? 'python' : 'javascript'
-      });
-    }
-  },
+class ShowboxController {
+  constructor() {
+    this.baseUrl = 'https://showbox.shegu.net/api/api_client.php';
+    this.apiKey = 'showbox'; // Default API key for ShowBox
+    this.contentDb = this.loadContentDb();
+  }
 
   /**
-   * Utility method to clear the cache (can be exposed as an endpoint if needed)
+   * Load the content database from JSON file
+   * @returns {Object} The loaded database
    */
-  clearCache(req, res) {
-    const cleared = showboxCache.flushAll();
-    return res.json({
-      success: true,
-      message: 'Cache cleared successfully',
-      itemsCleared: cleared
-    });
+  loadContentDb() {
+    try {
+      // Create directory if it doesn't exist
+      const dir = path.dirname(CONTENT_DB_PATH);
+      if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+      }
+      
+      // Create file if it doesn't exist
+      if (!fs.existsSync(CONTENT_DB_PATH)) {
+        fs.writeFileSync(CONTENT_DB_PATH, JSON.stringify({
+          movies: {},
+          shows: {}
+        }));
+      }
+      
+      return JSON.parse(fs.readFileSync(CONTENT_DB_PATH, 'utf8'));
+    } catch (error) {
+      console.error(`Error loading content database: ${error.message}`);
+      return { movies: {}, shows: {} };
+    }
   }
-};
+
+  /**
+   * Save the content database to JSON file
+   */
+  saveContentDb() {
+    try {
+      fs.writeFileSync(CONTENT_DB_PATH, JSON.stringify(this.contentDb, null, 2));
+    } catch (error) {
+      console.error(`Error saving content database: ${error.message}`);
+    }
+  }
+
+  /**
+   * Check if content is already uploaded
+   * @param {string} type - 'movie' or 'tv'
+   * @param {string} tmdbId - TMDB ID
+   * @param {string} [season] - Season number (for TV shows)
+   * @param {string} [episode] - Episode number (for TV shows)
+   * @returns {Object|null} Cached content info or null
+   */
+  getUploadedContent(type, tmdbId, season = null, episode = null) {
+    const collection = type === 'movie' ? this.contentDb.movies : this.contentDb.shows;
+    
+    if (type === 'movie') {
+      return collection[tmdbId] || null;
+    } else {
+      if (!collection[tmdbId]) return null;
+      if (!season || !episode) return collection[tmdbId];
+      
+      if (collection[tmdbId].episodes && 
+          collection[tmdbId].episodes[season] && 
+          collection[tmdbId].episodes[season][episode]) {
+        return collection[tmdbId].episodes[season][episode];
+      }
+      
+      return null;
+    }
+  }
+
+  /**
+   * Record uploaded content
+   * @param {string} type - 'movie' or 'tv'
+   * @param {string} tmdbId - TMDB ID
+   * @param {Object} contentInfo - Content info to store
+   * @param {string} [season] - Season number (for TV shows)
+   * @param {string} [episode] - Episode number (for TV shows)
+   */
+  recordUploadedContent(type, tmdbId, contentInfo, season = null, episode = null) {
+    const collection = type === 'movie' ? this.contentDb.movies : this.contentDb.shows;
+    
+    if (type === 'movie') {
+      collection[tmdbId] = contentInfo;
+    } else {
+      if (!collection[tmdbId]) {
+        collection[tmdbId] = { episodes: {} };
+      }
+      
+      if (!collection[tmdbId].episodes) {
+        collection[tmdbId].episodes = {};
+      }
+      
+      if (season && episode) {
+        if (!collection[tmdbId].episodes[season]) {
+          collection[tmdbId].episodes[season] = {};
+        }
+        
+        collection[tmdbId].episodes[season][episode] = contentInfo;
+      } else {
+        Object.assign(collection[tmdbId], contentInfo);
+      }
+    }
+    
+    this.saveContentDb();
+  }
+
+  /**
+   * Get showbox URL for a movie or TV show
+   * @param {Object} req - Express request object
+   * @param {Object} res - Express response object
+   */
+  async getShowboxUrl(req, res) {
+    const { type, tmdbId } = req.params;
+    const { season, episode } = req.query;
+
+    try {
+      // Check if content is already in our database
+      const cachedContent = this.getUploadedContent(type, tmdbId, season, episode);
+      if (cachedContent) {
+        return res.json({
+          success: true,
+          url: cachedContent.url,
+          quality: cachedContent.quality,
+          source: 'database',
+          ...cachedContent
+        });
+      }
+
+      // Check if request is in cache
+      const cacheKey = `showbox_${type}_${tmdbId}_${season || ''}_${episode || ''}`;
+      const cachedResult = showboxCache.get(cacheKey);
+      if (cachedResult) {
+        return res.json({
+          success: true,
+          ...cachedResult,
+          source: 'cache'
+        });
+      }
+
+      // Proceed with API request based on content type
+      let apiUrl, apiParams;
+
+      if (type === 'movie') {
+        apiUrl = this.baseUrl;
+        apiParams = {
+          ac: 'detail',
+          type: 'movie',
+          id: tmdbId,
+          key: this.apiKey
+        };
+      } else if (type === 'tv') {
+        if (!season || !episode) {
+          throw new Error('Season and episode are required for TV shows');
+        }
+
+        apiUrl = this.baseUrl;
+        apiParams = {
+          ac: 'detail',
+          type: 'tv',
+          id: tmdbId,
+          season: season,
+          episode: episode,
+          key: this.apiKey
+        };
+      } else {
+        throw new Error('Invalid content type. Must be "movie" or "tv"');
+      }
+
+      // Make request to ShowBox API
+      const response = await axios.get(apiUrl, { params: apiParams });
+      
+      if (!response.data || response.data.status !== 1) {
+        throw new Error('Failed to get content information from ShowBox');
+      }
+
+      // Process the video sources
+      const result = await this.processVideoSources(
+        response.data, type, tmdbId, season, episode
+      );
+      
+      // Cache the result
+      showboxCache.set(cacheKey, result);
+
+      // Return result to client
+      return res.json({
+        success: true,
+        ...result,
+        source: 'api'
+      });
+    } catch (error) {
+      console.error(`Showbox error for ${type} ${tmdbId}: ${error.message}`);
+      return res.status(500).json({
+        success: false,
+        error: error.message
+      });
+    }
+  }
+
+  /**
+   * Process video sources, prioritize quality and upload to Bunny if needed
+   * @param {Object} data - API response data
+   * @param {string} type - Content type (movie/tv)
+   * @param {string} tmdbId - TMDB ID
+   * @param {string} [season] - Season number (for TV shows)
+   * @param {string} [episode] - Episode number (for TV shows)
+   * @returns {Object} Processed video information
+   */
+  async processVideoSources(data, type, tmdbId, season = null, episode = null) {
+    let videoSources = [];
+    let bestSource = null;
+    
+    // Extract video sources from API response
+    if (data.videos && data.videos.length > 0) {
+      videoSources = data.videos.filter(v => 
+        v.link && typeof v.link === 'string' && v.link.trim() !== ''
+      );
+    }
+    
+    if (videoSources.length === 0) {
+      throw new Error('No valid video sources found');
+    }
+    
+    // Block febbox.com/video/vip_only.mp4 URL
+    videoSources = videoSources.filter(source => 
+      !source.link.includes('febbox.com/video/vip_only.mp4')
+    );
+    
+    if (videoSources.length === 0) {
+      throw new Error('Only restricted videos found');
+    }
+    
+    // Get quality info for each source and sort by priority
+    const sourcesWithQuality = videoSources.map(source => {
+      // Extract quality from source data
+      let quality = 'UNKNOWN';
+      
+      if (source.quality) {
+        quality = source.quality.toUpperCase();
+      } else if (source.link.includes('4k') || source.link.includes('2160p')) {
+        quality = source.link.includes('hdr') ? '4K HDR' : '4K';
+      } else if (source.link.includes('1080p') || source.link.includes('1080P')) {
+        quality = source.link.includes('hdr') ? '1080P HDR' : '1080P';
+      } else if (source.link.includes('720p') || source.link.includes('720P')) {
+        quality = '720P';
+      } else if (source.link.includes('480p') || source.link.includes('480P')) {
+        quality = '480P';
+      } else if (source.link.includes('360p') || source.link.includes('360P')) {
+        quality = '360P';
+      }
+      
+      return {
+        ...source,
+        quality,
+        priorityIndex: QUALITY_PRIORITY.indexOf(quality) !== -1 
+          ? QUALITY_PRIORITY.indexOf(quality) 
+          : QUALITY_PRIORITY.length
+      };
+    });
+    
+    // Sort by quality priority (lowest index = highest priority)
+    sourcesWithQuality.sort((a, b) => a.priorityIndex - b.priorityIndex);
+    
+    // Get the best quality source
+    bestSource = sourcesWithQuality[0];
+    
+    // Upload to Bunny Stream if not already in our database
+    const title = `${type === 'movie' ? 'Movie' : 'TV'} ${tmdbId}${season ? ` S${season}E${episode}` : ''}`;
+    
+    try {
+      // Upload to Bunny
+      const uploadResult = await bunnyStreamController.uploadVideoByUrl(
+        bestSource.link,
+        title
+      );
+      
+      if (uploadResult.success) {
+        // Create a record with quality info
+        const contentInfo = {
+          url: uploadResult.directPlayUrl || uploadResult.embedUrl,
+          quality: bestSource.quality,
+          uploadedAt: new Date().toISOString(),
+          videoId: uploadResult.videoId,
+          originalSource: bestSource.link
+        };
+        
+        // Record in our database
+        this.recordUploadedContent(type, tmdbId, contentInfo, season, episode);
+        
+        return {
+          url: contentInfo.url,
+          quality: contentInfo.quality,
+          videoId: contentInfo.videoId,
+          provider: 'bunny'
+        };
+      } else {
+        // If upload failed, return direct source as fallback
+        console.error(`Failed to upload to Bunny: ${uploadResult.error}`);
+        return {
+          url: bestSource.link,
+          quality: bestSource.quality,
+          provider: 'direct'
+        };
+      }
+    } catch (error) {
+      console.error(`Error uploading to Bunny: ${error.message}`);
+      return {
+        url: bestSource.link,
+        quality: bestSource.quality,
+        provider: 'direct',
+        error: error.message
+      };
+    }
+  }
+}
+
+export const showboxController = new ShowboxController();

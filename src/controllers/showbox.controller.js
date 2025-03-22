@@ -91,13 +91,15 @@ function getScraperUrl(url) {
   return `http://api.scraperapi.com?api_key=${SCRAPER_API_KEY}&url=${encodeURIComponent(url)}`;
 }
 
-async function getPythonScrapedLinks(shareUrl, uiToken) {
+async function getPythonScrapedLinks(shareUrl, customToken = null) {
+  const token = customToken || UI_TOKENS[Math.floor(Math.random() * UI_TOKENS.length)];
+  
   return new Promise((resolve, reject) => {
     // Construct the absolute path to the Python script
     const pythonScriptPath = path.join(__dirname, '..', 'scripts', 'showbox.py');
     console.log('🐍 Python script path:', pythonScriptPath);
 
-    const pythonProcess = spawn('python', [pythonScriptPath, shareUrl, uiToken]);
+    const pythonProcess = spawn('python', [pythonScriptPath, shareUrl, token]);
     let outputData = '';
     let errorData = '';
 
@@ -239,9 +241,9 @@ async function getFebboxShareLink(showboxId, type) {
   return data.data.link;
 }
 
-async function getStreamLinks(fid) {
+async function getStreamLinks(fid, customToken = null) {
   console.log(`🎯 Getting stream links for file ID: ${fid}`);
-  const randomToken = UI_TOKENS[Math.floor(Math.random() * UI_TOKENS.length)];
+  const token = customToken || UI_TOKENS[Math.floor(Math.random() * UI_TOKENS.length)];
 
   const playerResponse = await fetch("https://www.febbox.com/console/player", {
     method: 'POST',
@@ -249,7 +251,7 @@ async function getStreamLinks(fid) {
       'accept': '*/*',
       'content-type': 'application/x-www-form-urlencoded; charset=UTF-8',
       'x-requested-with': 'XMLHttpRequest',
-      'cookie': `ui=${randomToken}`,
+      'cookie': `ui=${token}`,
       'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
       'origin': 'https://www.febbox.com',
       'referer': 'https://www.febbox.com/file/share'
@@ -257,7 +259,7 @@ async function getStreamLinks(fid) {
     body: new URLSearchParams({
       'fid': fid,
       'share_key': '',
-      '_token': randomToken
+      '_token': token
     }).toString()
   });
 
@@ -417,13 +419,13 @@ async function tryUrlBasedId(title, year, type) {
   return null;
 }
 
-async function fetchFebboxFiles(shareKey, parentId = 0) {
-  const randomToken = UI_TOKENS[Math.floor(Math.random() * UI_TOKENS.length)];
+async function fetchFebboxFiles(shareKey, parentId = 0, customToken = null) {
+  const token = customToken || UI_TOKENS[Math.floor(Math.random() * UI_TOKENS.length)];
   const fileListUrl = `https://www.febbox.com/file/file_share_list?share_key=${shareKey}&parent_id=${parentId}`;
   
   const response = await fetch(fileListUrl, {
     headers: {
-      'cookie': `ui=${randomToken}`,
+      'cookie': `ui=${token}`,
       'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
     }
   });
@@ -535,13 +537,20 @@ function extractTopQualityStreams(streams) {
 export const showboxController = {
   async getShowboxUrl(req, res) {
     const { type, tmdbId } = req.params;
-    const { season, episode, py } = req.query;
+    const { season, episode, py, token } = req.query;
     let showboxId = null;
     let tmdbData = null;
     const usePython = py !== undefined;
+    const userToken = token || null;
+    
+    if (userToken) {
+      console.log(`👤 Using user-provided UI token: ${userToken.substring(0, 10)}...`);
+    }
 
     // Generate a unique cache key based on request parameters
-    const cacheKey = `showbox:${tmdbId}:${type}${season ? `:s${season}` : ''}${episode ? `:e${episode}` : ''}:${usePython ? 'py' : 'js'}`;
+    // Include a token hash to differentiate cached responses by token
+    const tokenHash = userToken ? userToken.substring(0, 8) : 'default';
+    const cacheKey = `showbox:${tmdbId}:${type}${season ? `:s${season}` : ''}${episode ? `:e${episode}` : ''}:${usePython ? 'py' : 'js'}:${tokenHash}`;
     
     // Check cache first
     const cachedResult = showboxCache.get(cacheKey);
@@ -553,7 +562,7 @@ export const showboxController = {
       });
     }
 
-    console.log(`\n🎬 Starting ShowBox scrape for TMDB ID: ${tmdbId} [${type}]${usePython ? ' using Python scraper' : ''}`);
+    console.log(`\n🎬 Starting ShowBox scrape for TMDB ID: ${tmdbId} [${type}]${usePython ? ' using Python scraper' : ''}${userToken ? ' with user token' : ''}`);
     
     try {
       const tmdbResponse = await fetch(
@@ -584,8 +593,7 @@ export const showboxController = {
       if (usePython) {
         console.log('🐍 Using Python scraper for:', febboxUrl);
         try {
-          const randomToken = UI_TOKENS[Math.floor(Math.random() * UI_TOKENS.length)];
-          const pythonResults = await getPythonScrapedLinks(febboxUrl, randomToken);
+          const pythonResults = await getPythonScrapedLinks(febboxUrl, userToken);
           console.log('✅ Python scraper results received');
           
           if (!pythonResults || !Array.isArray(pythonResults)) {
@@ -612,7 +620,7 @@ export const showboxController = {
 
       if (useJavaScript) {
         console.log('🟨 Using JavaScript scraper');
-        const files = await fetchFebboxFiles(shareKey);
+        const files = await fetchFebboxFiles(shareKey, 0, userToken);
         
         if (type === 'tv') {
           const seasons = {};
@@ -628,7 +636,7 @@ export const showboxController = {
             });
 
             if (targetSeasonFolder) {
-              const episodeFiles = await fetchFebboxFiles(shareKey, targetSeasonFolder.fid);
+              const episodeFiles = await fetchFebboxFiles(shareKey, targetSeasonFolder.fid, userToken);
               const seasonEpisodes = await Promise.all(episodeFiles.map(async (episodeFile) => {
                 const ext = episodeFile.file_name.split('.').pop().toLowerCase();
                 const episodeNumber = parseInt(episodeFile.file_name.match(/E(\d+)/i)?.[1] || '0', 10);
@@ -639,7 +647,7 @@ export const showboxController = {
                 }
 
                 const qualityMatch = episodeFile.file_name.match(/(1080p|720p|480p|360p|2160p|4k)/i);
-                const playerSources = await getStreamLinks(episodeFile.fid);
+                const playerSources = await getStreamLinks(episodeFile.fid, userToken);
 
                 return {
                   episode: episodeNumber,
@@ -791,7 +799,7 @@ export const showboxController = {
           streamLinks = await Promise.all(videoFiles.map(async (file) => {
             const ext = file.file_name.split('.').pop().toLowerCase();
             const qualityMatch = file.file_name.match(/(1080p|720p|480p|360p|2160p|4k)/i);
-            const playerSources = await getStreamLinks(file.fid);
+            const playerSources = await getStreamLinks(file.fid, userToken);
             
             return {
               filename: file.file_name,

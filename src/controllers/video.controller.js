@@ -386,30 +386,19 @@ async function getVideoWithFallback(embedUrl) {
 async function uploadToBunnyStream(videoData, metadata) {
   try {
     if (!videoData || !videoData.results || !videoData.results.length) {
-      return; // No logging needed for no-op case
+      return;
     }
 
     // Extract all available video URLs
     const videoUrls = [];
     for (const result of videoData.results) {
       if (result.video_urls && Array.isArray(result.video_urls)) {
-        // Get quality info if available
-        const qualityInfo = result.quality || 'Unknown';
-        
-        // Add primary URL (first in the list, usually highest quality)
+        // Get the highest quality URL only
         if (result.video_urls.length > 0) {
           videoUrls.push({
             url: result.video_urls[0],
-            quality: `${qualityInfo} Primary`
+            quality: result.quality || 'Unknown'
           });
-          
-          // Add secondary URL if available
-          if (result.video_urls.length > 1) {
-            videoUrls.push({
-              url: result.video_urls[1],
-              quality: `${qualityInfo} Secondary`
-            });
-          }
         }
       }
     }
@@ -418,25 +407,19 @@ async function uploadToBunnyStream(videoData, metadata) {
     
     console.log(`🐰 Uploading ${videoUrls.length} URLs for ${metadata.title || 'unknown'}`);
     
-    // Upload each URL to Bunny Stream
-    for (const { url, quality } of videoUrls) {
-      if (!url) continue;
+    // Upload only the first (highest quality) URL to Bunny Stream with collection support
+    const { url, quality } = videoUrls[0];
+    if (url) {
+      const uploadMetadata = {
+        title: metadata.title || `Video ${Date.now()}`,
+        type: metadata.season ? 'tv' : 'movie',
+        tmdbId: metadata.tmdbId,
+        season: metadata.season,
+        episode: metadata.episode,
+        quality
+      };
       
-      // Create a title with metadata and quality info
-      const title = metadata.title 
-        ? `${metadata.title}${metadata.season ? ` S${metadata.season}` : ''}${metadata.episode ? `E${metadata.episode}` : ''} [${quality}]`
-        : `Video ${new Date().toISOString()} [${quality}]`;
-      
-      // Upload in the background
-      bunnyStreamController.uploadVideoByUrl(url, title)
-        .then(result => {
-          if (!result.success && result.error) {
-            console.error(`🐰 Error uploading ${title.substring(0, 30)}...: ${result.error}`);
-          }
-        })
-        .catch(err => {
-          console.error(`🐰 Upload error: ${err.message}`);
-        });
+      bunnyStreamController.uploadVideoToCollection(url, uploadMetadata);
     }
   } catch (error) {
     console.error('🐰 Upload error:', error.message);

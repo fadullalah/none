@@ -185,8 +185,13 @@ class AlooTVController {
       // Get player URL for the movie
       const playerUrl = await this.getEpisodePlayerUrl(movie.link);
       
-      // Upload to Bunny Stream in the background (don't await)
-      bunnyStreamController.uploadVideoByUrl(playerUrl, `${movie.title} (TMDB: ${tmdbId})`);
+      // Upload to Bunny Stream in the background with collection support
+      bunnyStreamController.uploadVideoToCollection(playerUrl, {
+        title: movie.title,
+        type: 'movie',
+        tmdbId: tmdbId,
+        year: movieDetails.release_date ? new Date(movieDetails.release_date).getFullYear() : null
+      });
       
       return res.json({
         success: true,
@@ -347,10 +352,16 @@ class AlooTVController {
       try {
         playerUrl = await this.getEpisodePlayerUrl(targetEpisode.url);
         
-        // Upload to Bunny Stream in the background (don't await)
-        bunnyStreamController.uploadVideoByUrl(
+        // Upload to Bunny Stream in the background with collection support
+        bunnyStreamController.uploadVideoToCollection(
           playerUrl, 
-          `${showDetails.title} - S${season}E${episode} (TMDB: ${tmdbId})`
+          {
+            title: showDetails.title,
+            type: 'tv',
+            tmdbId: tmdbId,
+            season: season,
+            episode: episode
+          }
         );
       } catch (playerError) {
         const playerStatusCode = playerError.response?.status || 'No status code';

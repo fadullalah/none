@@ -21,11 +21,13 @@ const urlCache = new NodeCache({ stdTTL: 43200 }); // 12 hours
 
 const SCRAPER_API_KEY = '169e05c208dcbe5e453edd9c5957cc40';
 const UI_TOKENS = [
-'eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpYXQiOjE3NDI1NjM4MjYsIm5iZiI6MTc0MjU2MzgyNiwiZXhwIjoxNzczNjY3ODQ2LCJkYXRhIjp7InVpZCI6NjIzMzk2LCJ0b2tlbiI6IjUxZTVlMGQ5OTk5ZmYyNGNhNDU3Mjc0Y2Q2YTVhMmRmIn19.h5TNhw5vVjBdcyXruSSO3y_HfopZNr1NoEiAQBN0Rfk',
-'eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpYXQiOjE3Mzg3NzAxNjUsIm5iZiI6MTczODc3MDE2NSwiZXhwIjoxNzY5ODc0MTg1LCJkYXRhIjp7InVpZCI6Mzc2ODAyLCJ0b2tlbiI6IjkzNzM1MzViOTk3Yjk4ZmM5ZGY0YjVkYzA2ZWRjN2RiIn19.A3PZeqXtQm4YnxR4yOSHDnTDx4hayAC1VvD-s6aBEzo',
-'eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpYXQiOjE3NDI1NjQwMjksIm5iZiI6MTc0MjU2NDAyOSwiZXhwIjoxNzczNjY4MDQ5LCJkYXRhIjp7InVpZCI6NDUxMDE1LCJ0b2tlbiI6IjEyZjQ3YWFiNGJhMWQ5OGI1YmU3MzU3YWRmNzU2NGI3In19.Tpcpf2au_NEAhVLfrk153M6r07tkcHS-6hh9E5SKtlE',
-'eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpYXQiOjE3NDI1NjQxNDAsIm5iZiI6MTc0MjU2NDE0MCwiZXhwIjoxNzczNjY4MTYwLCJkYXRhIjp7InVpZCI6NjIzMzkxLCJ0b2tlbiI6IjQ0NGQ3ZjFhZTI1YzJkYjU2MjkwYWJhMWNmZWNjMzdjIn19.GjtPfpZP2mSXGc43ZMmO_tK5BS6AYFMbHT4f_rN1E9I'
-];
+  'eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpYXQiOjE3NDI1NjM4MjYsIm5iZiI6MTc0MjU2MzgyNiwiZXhwIjoxNzczNjY3ODQ2LCJkYXRhIjp7InVpZCI6NjIzMzk2LCJ0b2tlbiI6IjUxZTVlMGQ5OTk5ZmYyNGNhNDU3Mjc0Y2Q2YTVhMmRmIn19.h5TNhw5vVjBdcyXruSSO3y_HfopZNr1NoEiAQBN0Rfk',
+  'eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpYXQiOjE3Mzg3NzAxNjUsIm5iZiI6MTczODc3MDE2NSwiZXhwIjoxNzY5ODc0MTg1LCJkYXRhIjp7InVpZCI6Mzc2ODAyLCJ0b2tlbiI6IjkzNzM1MzViOTk3Yjk4ZmM5ZGY0YjVkYzA2ZWRjN2RiIn19.A3PZeqXtQm4YnxR4yOSHDnTDx4hayAC1VvD-s6aBEzo',
+  'eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpYXQiOjE3NDI1NjQwMjksIm5iZiI6MTc0MjU2NDAyOSwiZXhwIjoxNzczNjY4MDQ5LCJkYXRhIjp7InVpZCI6NDUxMDE1LCJ0b2tlbiI6IjEyZjQ3YWFiNGJhMWQ5OGI1YmU3MzU3YWRmNzU2NGI3In19.Tpcpf2au_NEAhVLfrk153M6r07tkcHS-6hh9E5SKtlE',
+  'eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpYXQiOjE3NDI1NjQxNDAsIm5iZiI6MTc0MjU2NDE0MCwiZXhwIjoxNzczNjY4MTYwLCJkYXRhIjp7InVpZCI6NjIzMzkxLCJ0b2tlbiI6IjQ0NGQ3ZjFhZTI1YzJkYjU2MjkwYWJhMWNmZWNjMzdjIn19.GjtPfpZP2mSXGc43ZMmO_tK5BS6AYFMbHT4f_rN1E9I',
+  'eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpYXQiOjE3NDI2MDEwMTksIm5iZiI6MTc0MjYwMTAxOSwiZXhwIjoxNzczNzA1MDM5LCJkYXRhIjp7InVpZCI6NDg4NDc5LCJ0b2tlbiI6ImE1ZGI0ZmU1OGQ1YzI5YmE1OTZhZDlhYjkyZTBjNzI1In19.d2s2L0j1c4sVeJkRieZD2aoREh-WTjLvPSCnkCdtiBM',
+  'eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpYXQiOjE3NDI2MTUxNjEsIm5iZiI6MTc0MjYxNTE2MSwiZXhwIjoxNzczNzE5MTgxLCJkYXRhIjp7InVpZCI6Njg5Njk2LCJ0b2tlbiI6ImRmZWMyZDdhOWRiNTRkYWE1NzYwNWE5NjcyYjhkODAwIn19.SlVYXj_IMWwRUuCvC2cXOAaVLEqgzexEC4NEiJqupSo',
+  ];
 
 // Define quality priority order
 const QUALITY_PRIORITY = [
@@ -699,9 +701,16 @@ export const showboxController = {
               
               try {
                 // Only upload primary (highest) quality
-                bunnyStreamController.uploadVideoByUrl(
+                bunnyStreamController.uploadVideoToCollection(
                   qualityStreams.primary,
-                  `${title}${type === 'tv' ? ` S${season}E${episode}` : ''} (TMDB: ${tmdbId}) [${qualityStreams.primaryQuality}]`
+                  {
+                    title: `${title}${type === 'tv' ? ` S${season}E${episode}` : ''} (TMDB: ${tmdbId})`,
+                    type: 'tv',
+                    tmdbId,
+                    season: parseInt(season, 10),
+                    episode: parseInt(episode, 10),
+                    quality: qualityStreams.primaryQuality
+                  }
                 );
               } catch (uploadError) {
                 console.error(`🐰 Upload error: ${uploadError.message}`);
@@ -757,9 +766,14 @@ export const showboxController = {
               
               try {
                 // Only upload primary (highest) quality
-                bunnyStreamController.uploadVideoByUrl(
+                bunnyStreamController.uploadVideoToCollection(
                   qualityStreams.primary,
-                  `${title}${type === 'tv' ? ` S${season}E${episode}` : ''} (TMDB: ${tmdbId}) [${qualityStreams.primaryQuality}]`
+                  {
+                    title: `${title} (TMDB: ${tmdbId})`,
+                    type: 'movie',
+                    tmdbId,
+                    quality: qualityStreams.primaryQuality
+                  }
                 );
               } catch (uploadError) {
                 console.error(`🐰 Upload error: ${uploadError.message}`);
@@ -835,9 +849,16 @@ export const showboxController = {
           
           try {
             // Only upload primary (highest) quality
-            bunnyStreamController.uploadVideoByUrl(
+            bunnyStreamController.uploadVideoToCollection(
               qualityStreams.primary,
-              `${title}${type === 'tv' ? ` S${season}E${episode}` : ''} (TMDB: ${tmdbId}) [${qualityStreams.primaryQuality}]`
+              {
+                title: `${title}${type === 'tv' ? ` S${season}E${episode}` : ''} (TMDB: ${tmdbId})`,
+                type: 'tv',
+                tmdbId,
+                season: parseInt(season, 10),
+                episode: parseInt(episode, 10),
+                quality: qualityStreams.primaryQuality
+              }
             );
           } catch (uploadError) {
             console.error(`🐰 Upload error: ${uploadError.message}`);
@@ -893,9 +914,14 @@ export const showboxController = {
           
           try {
             // Only upload primary (highest) quality
-            bunnyStreamController.uploadVideoByUrl(
+            bunnyStreamController.uploadVideoToCollection(
               qualityStreams.primary,
-              `${title}${type === 'tv' ? ` S${season}E${episode}` : ''} (TMDB: ${tmdbId}) [${qualityStreams.primaryQuality}]`
+              {
+                title: `${title} (TMDB: ${tmdbId})`,
+                type: 'movie',
+                tmdbId,
+                quality: qualityStreams.primaryQuality
+              }
             );
           } catch (uploadError) {
             console.error(`🐰 Upload error: ${uploadError.message}`);

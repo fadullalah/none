@@ -185,7 +185,7 @@ class AlooTVController {
       // Get player URL for the movie
       const playerUrl = await this.getEpisodePlayerUrl(movie.link);
       
-      // Upload to Bunny Stream in the background with collection support
+      // Upload 2 Bunny Stream in the background with collection support
       bunnyStreamController.uploadVideoToCollection(playerUrl, {
         title: movie.title,
         type: 'movie',

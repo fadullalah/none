@@ -248,32 +248,8 @@ class AlooTVController {
       // Get Arabic title for better search results
       const arabicTitle = tvDetails.name || tvDetails.original_name;
       
-      // Search for the TV show on AlooTV
-      let searchResults;
-      try {
-        searchResults = await this.search(arabicTitle);
-        
-        if (searchResults.length === 0) {
-          // If no results, try searching with English name as fallback
-          if (tvDetails.original_language !== 'ar' && tvDetails.original_name !== arabicTitle) {
-            console.log(`No results for Arabic name "${arabicTitle}", trying original name "${tvDetails.original_name}"`);
-            searchResults = await this.search(tvDetails.original_name);
-          }
-        }
-      } catch (searchError) {
-        const searchStatusCode = searchError.response?.status || 'No status code';
-        const searchErrorCode = searchError.code || 'No error code';
-        
-        return res.status(500).json({
-          success: false,
-          message: 'Failed to search for TV show on AlooTV',
-          error: searchError.message,
-          status_code: searchStatusCode,
-          error_code: searchErrorCode,
-          search_query: arabicTitle,
-          tmdb_id: tmdbId
-        });
-      }
+      // Use enhanced search that tries multiple search variations
+      let searchResults = await this.enhancedSearch(tvDetails);
       
       if (!searchResults || searchResults.length === 0) {
         return res.status(404).json({
@@ -409,6 +385,157 @@ class AlooTVController {
   }
 
   /**
+   * Enhanced search that tries multiple search strategies
+   * @param {Object} tvDetails - TV show details from TMDB
+   * @returns {Promise<Array>} - Search results
+   */
+  async enhancedSearch(tvDetails) {
+    const arabicTitle = tvDetails.name || tvDetails.original_name;
+    const originalTitle = tvDetails.original_name;
+    const allSearchAttempts = [];
+    let searchResults = [];
+    
+    console.log(`Starting enhanced search for: "${arabicTitle}" (Original: "${originalTitle}")`);
+    
+    // Strategy 1: Try the full Arabic title first
+    try {
+      searchResults = await this.search(arabicTitle);
+      console.log(`Strategy 1 (Full Arabic title): Found ${searchResults.length} results`);
+      allSearchAttempts.push({ query: arabicTitle, results: searchResults.length });
+      
+      if (searchResults.length > 0) {
+        return searchResults;
+      }
+    } catch (error) {
+      console.error(`Error in strategy 1: ${error.message}`);
+    }
+    
+    // Strategy 2: Try the original title
+    if (originalTitle && originalTitle !== arabicTitle) {
+      try {
+        searchResults = await this.search(originalTitle);
+        console.log(`Strategy 2 (Original title): Found ${searchResults.length} results`);
+        allSearchAttempts.push({ query: originalTitle, results: searchResults.length });
+        
+        if (searchResults.length > 0) {
+          return searchResults;
+        }
+      } catch (error) {
+        console.error(`Error in strategy 2: ${error.message}`);
+      }
+    }
+    
+    // Strategy 3: Try main part of the title (before any colon or dash)
+    const mainTitleMatch = arabicTitle.match(/^([^:—–-]+)/);
+    if (mainTitleMatch && mainTitleMatch[1].trim() !== arabicTitle) {
+      const mainTitle = mainTitleMatch[1].trim();
+      try {
+        searchResults = await this.search(mainTitle);
+        console.log(`Strategy 3 (Main part of title): "${mainTitle}" found ${searchResults.length} results`);
+        allSearchAttempts.push({ query: mainTitle, results: searchResults.length });
+        
+        if (searchResults.length > 0) {
+          return searchResults;
+        }
+      } catch (error) {
+        console.error(`Error in strategy 3: ${error.message}`);
+      }
+    }
+    
+    // Strategy 4: Try with the first few words of the title
+    const words = arabicTitle.split(' ');
+    if (words.length > 2) {
+      const shortTitle = words.slice(0, 3).join(' '); // First 3 words
+      try {
+        searchResults = await this.search(shortTitle);
+        console.log(`Strategy 4 (First few words): "${shortTitle}" found ${searchResults.length} results`);
+        allSearchAttempts.push({ query: shortTitle, results: searchResults.length });
+        
+        if (searchResults.length > 0) {
+          return searchResults;
+        }
+      } catch (error) {
+        console.error(`Error in strategy 4: ${error.message}`);
+      }
+    }
+    
+    // Strategy 5: Try with key character names or distinctive words
+    const keyParts = arabicTitle.split(/[:\s—–-]+/).filter(part => part.length > 3);
+    for (let i = 0; i < keyParts.length && i < 2; i++) {
+      try {
+        searchResults = await this.search(keyParts[i]);
+        console.log(`Strategy 5 (Key word ${i+1}): "${keyParts[i]}" found ${searchResults.length} results`);
+        allSearchAttempts.push({ query: keyParts[i], results: searchResults.length });
+        
+        if (searchResults.length > 0) {
+          // Filter results to make sure they're relevant to our original query
+          const filteredResults = this.filterRelevantResults(searchResults, arabicTitle, originalTitle);
+          if (filteredResults.length > 0) {
+            console.log(`Found ${filteredResults.length} relevant results after filtering`);
+            return filteredResults;
+          }
+        }
+      } catch (error) {
+        console.error(`Error in strategy 5 part ${i+1}: ${error.message}`);
+      }
+    }
+    
+    console.log('All search strategies exhausted. Search attempts:', allSearchAttempts);
+    return [];
+  }
+  
+  /**
+   * Filter search results to ensure they're relevant to the original query
+   * @param {Array} results - Search results
+   * @param {string} arabicTitle - Arabic title
+   * @param {string} originalTitle - Original title
+   * @returns {Array} - Filtered results
+   */
+  filterRelevantResults(results, arabicTitle, originalTitle) {
+    // When using partial search terms, we need to ensure results are relevant
+    if (!results || results.length === 0) return [];
+    
+    // Convert titles to lowercase for comparison
+    const arabicTitleLower = arabicTitle.toLowerCase();
+    const originalTitleLower = originalTitle ? originalTitle.toLowerCase() : '';
+    
+    // For each result, calculate a relevance score
+    const scoredResults = results.map(result => {
+      const title = result.title.toLowerCase();
+      let score = 0;
+      
+      // Check if the result title contains parts of our search query
+      if (title.includes(arabicTitleLower) || arabicTitleLower.includes(title)) {
+        score += 3;
+      }
+      
+      if (originalTitleLower && (title.includes(originalTitleLower) || originalTitleLower.includes(title))) {
+        score += 2;
+      }
+      
+      // Split titles into words and check for word overlap
+      const resultWords = title.split(/\s+/);
+      const arabicWords = arabicTitleLower.split(/\s+/);
+      
+      // Count matching words
+      for (const word of arabicWords) {
+        if (word.length > 2 && resultWords.includes(word)) {
+          score += 1;
+        }
+      }
+      
+      return { ...result, relevanceScore: score };
+    });
+    
+    // Filter results with at least some relevance and sort by score
+    const relevantResults = scoredResults
+      .filter(result => result.relevanceScore > 0)
+      .sort((a, b) => b.relevanceScore - a.relevanceScore);
+    
+    return relevantResults;
+  }
+
+  /**
    * Discover the current domain by using the domain worker
    * @returns {Promise<string>} Current domain for AlooTV
    */
@@ -420,33 +547,83 @@ class AlooTVController {
       return cachedDomain;
     }
     
-    try {
-      console.log('Fetching AlooTV domain from worker...');
-      const response = await axios.get('https://domain.nunflix-info.workers.dev/', {
-        timeout: 5000,
-        headers: this.headers
-      });
-      const domain = response.data.trim();
-      
-      if (!domain) {
-        throw new Error('Empty domain returned from worker');
+    // Increased timeout from 5 seconds to 15 seconds
+    const timeoutMs = 15000;
+    // Add retry attempts
+    const maxRetries = 3;
+    let lastError = null;
+    
+    // Try multiple times with increasing timeouts
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        console.log(`Fetching AlooTV domain from worker (attempt ${attempt}/${maxRetries})...`);
+        
+        const response = await axios.get('https://domain.nunflix-info.workers.dev/', {
+          timeout: timeoutMs * attempt, // Increase timeout with each retry
+          headers: this.headers
+        });
+        
+        const domain = response.data.trim();
+        
+        if (!domain) {
+          throw new Error('Empty domain returned from worker');
+        }
+        
+        console.log('Found domain:', domain);
+        
+        // Format the domain with https protocol
+        const formattedDomain = `https://${domain}`;
+        
+        // Cache the domain for longer to reduce API calls
+        alootvCache.set(cacheKey, formattedDomain, 12 * 3600); // Cache for 12 hours
+        
+        return formattedDomain;
+      } catch (error) {
+        const statusCode = error.response?.status || 'No status code';
+        const errorCode = error.code || 'No error code';
+        
+        console.error(`Error discovering AlooTV domain (attempt ${attempt}/${maxRetries}): ${error.message}, Status: ${statusCode}, Code: ${errorCode}`);
+        
+        lastError = error;
+        
+        // If this isn't the last attempt, wait before retrying
+        if (attempt < maxRetries) {
+          const waitTime = 1000 * attempt; // Progressively longer waits
+          console.log(`Waiting ${waitTime}ms before next attempt...`);
+          await new Promise(resolve => setTimeout(resolve, waitTime));
+        }
       }
-      
-      console.log('Found domain:', domain);
-      
-      // Format the domain with https protocol
-      const formattedDomain = `https://${domain}`;
-      
-      // Cache the domain for longer to reduce API calls
-      alootvCache.set(cacheKey, formattedDomain, 12 * 3600); // Cache for 12 hours
-      
-      return formattedDomain;
-    } catch (error) {
-      const statusCode = error.response?.status || 'No status code';
-      const errorCode = error.code || 'No error code';
-      console.error(`Error discovering AlooTV domain: ${error.message}, Status: ${statusCode}, Code: ${errorCode}`);
-      throw error;
     }
+    
+    // Fallback to hardcoded domains if all attempts fail
+    console.log('All domain discovery attempts failed, using fallback domains...');
+    const fallbackDomains = [
+      'https://a4500sdf.9alooytv.shop',
+      'https://4500sd.alooytv.today',
+      'https://a4500sd.alooytv.online'
+    ];
+    
+    // Try each fallback domain
+    for (const fallbackDomain of fallbackDomains) {
+      try {
+        console.log(`Testing fallback domain: ${fallbackDomain}`);
+        const testResponse = await axios.get(`${fallbackDomain}/search?q=test`, {
+          timeout: timeoutMs,
+          headers: this.headers
+        });
+        
+        if (testResponse.status === 200) {
+          console.log(`Fallback domain ${fallbackDomain} is working`);
+          alootvCache.set(cacheKey, fallbackDomain, 6 * 3600); // Cache for 6 hours (shorter than normal)
+          return fallbackDomain;
+        }
+      } catch (fallbackError) {
+        console.error(`Fallback domain ${fallbackDomain} is not working:`, fallbackError.message);
+      }
+    }
+    
+    // If we've gotten here, throw the original error
+    throw lastError || new Error('Failed to discover AlooTV domain after multiple attempts');
   }
 
   /**

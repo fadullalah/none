@@ -19,7 +19,7 @@ const showboxCache = new NodeCache({ stdTTL: 21600 });
 const imdbCache = new NodeCache({ stdTTL: 86400 }); // 24 hours
 const urlCache = new NodeCache({ stdTTL: 43200 }); // 12 hours
 
-const SCRAPER_API_KEY = '169e05c208dcbe5e453edd9c5957cc41';
+const SCRAPER_API_KEY = '169e05c208dcbe5e453edd9c5957cc40';
 const UI_TOKENS = [
   'eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpYXQiOjE3NDI1NjM4MjYsIm5iZiI6MTc0MjU2MzgyNiwiZXhwIjoxNzczNjY3ODQ2LCJkYXRhIjp7InVpZCI6NjIzMzk2LCJ0b2tlbiI6IjUxZTVlMGQ5OTk5ZmYyNGNhNDU3Mjc0Y2Q2YTVhMmRmIn19.h5TNhw5vVjBdcyXruSSO3y_HfopZNr1NoEiAQBN0Rfk',
   'eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpYXQiOjE3Mzg3NzAxNjUsIm5iZiI6MTczODc3MDE2NSwiZXhwIjoxNzY5ODc0MTg1LCJkYXRhIjp7InVpZCI6Mzc2ODAyLCJ0b2tlbiI6IjkzNzM1MzViOTk3Yjk4ZmM5ZGY0YjVkYzA2ZWRjN2RiIn19.A3PZeqXtQm4YnxR4yOSHDnTDx4hayAC1VvD-s6aBEzo',
@@ -548,9 +548,9 @@ export const showboxController = {
     }
 
     // Generate a unique cache key based on request parameters
-    // Include a token hash to differentiate cached responses by token
-    const tokenHash = userToken ? userToken.substring(0, 8) : 'default';
-    const cacheKey = `showbox:${tmdbId}:${type}${season ? `:s${season}` : ''}${episode ? `:e${episode}` : ''}:${usePython ? 'py' : 'js'}:${tokenHash}`;
+    // Include the full token to prevent sharing cached responses between different users
+    const tokenIdentifier = userToken || 'default';
+    const cacheKey = `showbox:${tmdbId}:${type}${season ? `:s${season}` : ''}${episode ? `:e${episode}` : ''}:${usePython ? 'py' : 'js'}:${tokenIdentifier}`;
     
     // Check cache first
     const cachedResult = showboxCache.get(cacheKey);
@@ -725,8 +725,43 @@ export const showboxController = {
               }
             }
 
-            // Store in cache before returning
-            showboxCache.set(cacheKey, responseData);
+            // Helper function to check if response has valid video links
+            const hasValidStreams = (data) => {
+              // For movies or TV episode requests with direct streams
+              if (data.streams) {
+                const hasPlayerStreams = data.streams.player_streams && 
+                                      data.streams.player_streams.length > 0 && 
+                                      data.streams.player_streams[0].file;
+                  
+                const hasDirectStreams = Array.isArray(data.streams) && 
+                                       data.streams.length > 0 && 
+                                       data.streams[0].player_streams && 
+                                       data.streams[0].player_streams.length > 0;
+                  
+                return hasPlayerStreams || hasDirectStreams;
+              }
+              
+              // For TV shows with seasons data
+              if (data.seasons) {
+                // Check if any season has episodes with streams
+                return Object.values(data.seasons).some(episodes => 
+                  Array.isArray(episodes) && 
+                  episodes.length > 0 && 
+                  episodes[0].player_streams && 
+                  episodes[0].player_streams.length > 0
+                );
+              }
+              
+              return false;
+            };
+
+            // Only cache responses that have valid video links
+            if (hasValidStreams(responseData)) {
+              console.log('✅ Response contains valid streams, caching result');
+              showboxCache.set(cacheKey, responseData);
+            } else {
+              console.log('⚠️ Response does not contain valid streams, not caching');
+            }
 
             return res.json(responseData);
           }
@@ -789,8 +824,43 @@ export const showboxController = {
             }
           }
 
-          // Store in cache before returning
-          showboxCache.set(cacheKey, responseData);
+          // Helper function to check if response has valid video links
+          const hasValidStreams = (data) => {
+            // For movies or TV episode requests with direct streams
+            if (data.streams) {
+              const hasPlayerStreams = data.streams.player_streams && 
+                                    data.streams.player_streams.length > 0 && 
+                                    data.streams.player_streams[0].file;
+                  
+              const hasDirectStreams = Array.isArray(data.streams) && 
+                                     data.streams.length > 0 && 
+                                     data.streams[0].player_streams && 
+                                     data.streams[0].player_streams.length > 0;
+                  
+              return hasPlayerStreams || hasDirectStreams;
+            }
+            
+            // For TV shows with seasons data
+            if (data.seasons) {
+              // Check if any season has episodes with streams
+              return Object.values(data.seasons).some(episodes => 
+                Array.isArray(episodes) && 
+                episodes.length > 0 && 
+                episodes[0].player_streams && 
+                episodes[0].player_streams.length > 0
+              );
+            }
+            
+            return false;
+          };
+
+          // Only cache responses that have valid video links
+          if (hasValidStreams(responseData)) {
+            console.log('✅ Response contains valid streams, caching result');
+            showboxCache.set(cacheKey, responseData);
+          } else {
+            console.log('⚠️ Response does not contain valid streams, not caching');
+          }
 
           return res.json(responseData);
         } else {
@@ -873,8 +943,43 @@ export const showboxController = {
           }
         }
 
-        // Store in cache before returning
-        showboxCache.set(cacheKey, responseData);
+        // Helper function to check if response has valid video links
+        const hasValidStreams = (data) => {
+          // For movies or TV episode requests with direct streams
+          if (data.streams) {
+            const hasPlayerStreams = data.streams.player_streams && 
+                                  data.streams.player_streams.length > 0 && 
+                                  data.streams.player_streams[0].file;
+              
+            const hasDirectStreams = Array.isArray(data.streams) && 
+                                   data.streams.length > 0 && 
+                                   data.streams[0].player_streams && 
+                                   data.streams[0].player_streams.length > 0;
+              
+            return hasPlayerStreams || hasDirectStreams;
+          }
+          
+          // For TV shows with seasons data
+          if (data.seasons) {
+            // Check if any season has episodes with streams
+            return Object.values(data.seasons).some(episodes => 
+              Array.isArray(episodes) && 
+              episodes.length > 0 && 
+              episodes[0].player_streams && 
+              episodes[0].player_streams.length > 0
+            );
+          }
+          
+          return false;
+        };
+
+        // Only cache responses that have valid video links
+        if (hasValidStreams(responseData)) {
+          console.log('✅ Response contains valid streams, caching result');
+          showboxCache.set(cacheKey, responseData);
+        } else {
+          console.log('⚠️ Response does not contain valid streams, not caching');
+        }
 
         return res.json(responseData);
       }
@@ -937,8 +1042,43 @@ export const showboxController = {
         }
       }
 
-      // Store in cache before returning
-      showboxCache.set(cacheKey, responseData);
+      // Helper function to check if response has valid video links
+      const hasValidStreams = (data) => {
+        // For movies or TV episode requests with direct streams
+        if (data.streams) {
+          const hasPlayerStreams = data.streams.player_streams && 
+                                data.streams.player_streams.length > 0 && 
+                                data.streams.player_streams[0].file;
+          
+          const hasDirectStreams = Array.isArray(data.streams) && 
+                                 data.streams.length > 0 && 
+                                 data.streams[0].player_streams && 
+                                 data.streams[0].player_streams.length > 0;
+          
+          return hasPlayerStreams || hasDirectStreams;
+        }
+        
+        // For TV shows with seasons data
+        if (data.seasons) {
+          // Check if any season has episodes with streams
+          return Object.values(data.seasons).some(episodes => 
+            Array.isArray(episodes) && 
+            episodes.length > 0 && 
+            episodes[0].player_streams && 
+            episodes[0].player_streams.length > 0
+          );
+        }
+        
+        return false;
+      };
+
+      // Only cache responses that have valid video links
+      if (hasValidStreams(responseData)) {
+        console.log('✅ Response contains valid streams, caching result');
+        showboxCache.set(cacheKey, responseData);
+      } else {
+        console.log('⚠️ Response does not contain valid streams, not caching');
+      }
 
       return res.json(responseData);
 

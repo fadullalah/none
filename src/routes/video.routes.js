@@ -95,4 +95,8 @@ router.get('/bunny/collections/:id/videos', async (req, res) => {
   }
 });
 
+// New OpenSubtitles API routes
+router.get('/subtitles/search', subtitleController.searchSubtitles);
+router.get('/subtitles/download', subtitleController.downloadSubtitle);
+
 export default router;

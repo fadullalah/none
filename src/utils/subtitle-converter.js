@@ -1,4 +1,5 @@
 import fetch from 'node-fetch';
+import { subtitleCache } from './cache-manager.js';
 
 // OpenSubtitles API constants
 const OPENSUBTITLES_API_URL = 'https://api.opensubtitles.com/api/v1';
@@ -90,11 +91,18 @@ export async function fetchAndConvertSubtitles(url) {
   }
 }
 
-// New OpenSubtitles API functions
+// Updated OpenSubtitles API functions with caching
 export async function searchSubtitles(params) {
   console.log('Searching for subtitles with params:', params);
   
-  // Build query params
+  // Try to get from cache first
+  const cachedResults = await subtitleCache.getSearch(params);
+  if (cachedResults) {
+    console.log('Returning cached subtitle search results');
+    return cachedResults;
+  }
+  
+  // Build query params for API request
   const queryParams = new URLSearchParams();
   
   // Add all provided parameters to the query
@@ -126,6 +134,10 @@ export async function searchSubtitles(params) {
     
     const data = await response.json();
     console.log(`Found ${data.data?.length || 0} subtitles`);
+    
+    // Cache the results
+    await subtitleCache.cacheSearch(params, data);
+    
     return data;
   } catch (error) {
     console.error('Failed to search subtitles:', error);
@@ -135,6 +147,13 @@ export async function searchSubtitles(params) {
 
 export async function downloadSubtitle(fileId) {
   console.log('Downloading subtitle with file ID:', fileId);
+  
+  // Try to get from cache first
+  const cachedSubtitle = await subtitleCache.getSubtitleContent(fileId);
+  if (cachedSubtitle) {
+    console.log('Returning cached subtitle content');
+    return cachedSubtitle;
+  }
   
   try {
     // Request download URL
@@ -178,12 +197,17 @@ export async function downloadSubtitle(fileId) {
       finalContent = subtitleContent;
     }
     
-    return {
+    const subtitleData = {
       content: finalContent,
       fileName: downloadData.file_name,
       format: downloadData.file_name.split('.').pop(),
       originalLink: downloadData.link
     };
+    
+    // Cache the result
+    await subtitleCache.cacheSubtitleContent(fileId, subtitleData);
+    
+    return subtitleData;
   } catch (error) {
     console.error('Failed to download subtitle:', error);
     throw error;

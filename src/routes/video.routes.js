@@ -13,6 +13,7 @@ import { playerScraperController } from '../controllers/player.scraper.controlle
 import { faselhdController } from '../controllers/faselhd.controller.js';
 import { alootvController } from '../controllers/alooytv.controller.js';
 import { bunnyStreamController } from '../controllers/bunny.controller.js';
+import { subtitleCache } from '../utils/cache-manager.js';
 
 const router = express.Router();
 
@@ -98,5 +99,33 @@ router.get('/bunny/collections/:id/videos', async (req, res) => {
 // New OpenSubtitles API routes
 router.get('/subtitles/search', subtitleController.searchSubtitles);
 router.get('/subtitles/download', subtitleController.downloadSubtitle);
+
+// Cache management route
+router.post('/subtitles/clear-cache', async (req, res) => {
+  try {
+    const { type = 'all' } = req.query;
+    
+    let result = false;
+    
+    if (type === 'search') {
+      result = await subtitleCache.clearSearchCache();
+    } else if (type === 'content') {
+      result = await subtitleCache.clearContentCache();
+    } else {
+      result = await subtitleCache.clearAllCaches();
+    }
+    
+    return res.json({
+      success: result,
+      message: `${type} subtitle cache cleared successfully`
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to clear subtitle cache',
+      details: error.message
+    });
+  }
+});
 
 export default router;

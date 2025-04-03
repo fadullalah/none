@@ -12,12 +12,15 @@ import { bunnyStreamController } from './bunny.controller.js';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-// Create a cache for storing ShowBox results (TTL: 6 hours)
-const showboxCache = new NodeCache({ stdTTL: 21600 });
+// Create a cache for storing ShowBox results (TTL: 12 hours)
+const showboxCache = new NodeCache({ stdTTL: 43200 });
 
 // Add these near the top with other cache declarations
-const imdbCache = new NodeCache({ stdTTL: 86400 }); // 24 hours
-const urlCache = new NodeCache({ stdTTL: 43200 }); // 12 hours
+const imdbCache = new NodeCache({ stdTTL: 172800 }); // 48 hours
+const urlCache = new NodeCache({ stdTTL: 86400 }); // 24 hours
+
+// Add a memory cache for stream links to avoid repeated calls
+const streamLinkCache = new NodeCache({ stdTTL: 3600 }); // 1 hour cache
 
 const SCRAPER_API_KEY = '169e05c208dcbe5e453edd9c5957cc40';
 const UI_TOKENS = [
@@ -34,8 +37,59 @@ const QUALITY_PRIORITY = [
   '4K HDR', '4K', 'ORIGINAL', '1080P', '720P', '480P', '360P'
 ];
 
-// Helper function to prioritize sources based on quality
+// Add near the top with other constants
+const FETCH_TIMEOUT = 8000; // 8 second timeout for all fetch requests
+
+// Replace regular fetch with timeout fetch
+async function fetchWithTimeout(url, options = {}) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT);
+  
+  try {
+    const response = await fetch(url, {
+      ...options,
+      signal: controller.signal
+    });
+    clearTimeout(timeoutId);
+    return response;
+  } catch (error) {
+    clearTimeout(timeoutId);
+    throw error;
+  }
+}
+
+// Replace the complex getBestQualitySource with a faster version
 const getBestQualitySource = (sources) => {
+  if (!sources || !Array.isArray(sources) || sources.length === 0) {
+    return null;
+  }
+
+  // Simple map of quality priorities
+  const qualityScore = {
+    '4K HDR': 100, '4K': 90, 'ORIGINAL': 85, '1080P': 80, 
+    '720P': 70, '480P': 60, '360P': 50
+  };
+  
+  // Sort with faster comparison
+  return sources.sort((a, b) => {
+    const aQuality = (a.quality || '').toUpperCase();
+    const bQuality = (b.quality || '').toUpperCase();
+    
+    // Direct quality comparison using lookup
+    for (const q in qualityScore) {
+      const aHas = aQuality.includes(q);
+      const bHas = bQuality.includes(q);
+      
+      if (aHas && !bHas) return -1;
+      if (!aHas && bHas) return 1;
+    }
+    
+    return 0;
+  })[0];
+};
+
+// Helper function to prioritize sources based on quality
+const getBestQualitySourceOld = (sources) => {
   if (!sources || !Array.isArray(sources) || sources.length === 0) {
     return null;
   }
@@ -97,8 +151,14 @@ async function getPythonScrapedLinks(shareUrl, customToken = null) {
   return new Promise((resolve, reject) => {
     // Construct the absolute path to the Python script
     const pythonScriptPath = path.join(__dirname, '..', 'scripts', 'showbox.py');
-    console.log('🐍 Python script path:', pythonScriptPath);
-
+    
+    // Add timeout to kill hanging Python processes
+    let timeoutId = setTimeout(() => {
+      console.log('⏱️ Python script timeout - killing process');
+      pythonProcess.kill();
+      reject(new Error('Python script execution timed out'));
+    }, 15000); // 15 second timeout
+    
     const pythonProcess = spawn('python', [pythonScriptPath, shareUrl, token]);
     let outputData = '';
     let errorData = '';
@@ -116,6 +176,7 @@ async function getPythonScrapedLinks(shareUrl, customToken = null) {
     });
 
     pythonProcess.on('close', (code) => {
+      clearTimeout(timeoutId); // Clear the timeout when process finishes
       if (code !== 0) {
         console.error('❌ Python scraper error:', errorData);
         reject(new Error(`Python scraper failed: ${errorData}`));
@@ -139,11 +200,12 @@ async function getPythonScrapedLinks(shareUrl, customToken = null) {
   });
 }
 
+// Modify searchShowboxByTitle to use fetchWithTimeout and parallelize requests
 async function searchShowboxByTitle(title, type, year) {
   console.log(`🔎 Searching ShowBox for: "${title}" (${year}) [${type}]`);
   const searchUrl = getScraperUrl(`https://showbox.media/search?keyword=${encodeURIComponent(title)}`);
   
-  const response = await fetch(searchUrl);
+  const response = await fetchWithTimeout(searchUrl);
   const html = await response.text();
   const $ = cheerio.load(html);
   
@@ -241,7 +303,15 @@ async function getFebboxShareLink(showboxId, type) {
   return data.data.link;
 }
 
+// Modify getStreamLinks to use cache
 async function getStreamLinks(fid, customToken = null) {
+  const cacheKey = `stream:${fid}`;
+  const cached = streamLinkCache.get(cacheKey);
+  if (cached) {
+    console.log(`📦 Using cached stream links for ${fid}`);
+    return cached;
+  }
+  
   console.log(`🎯 Getting stream links for file ID: ${fid}`);
   const token = customToken || UI_TOKENS[Math.floor(Math.random() * UI_TOKENS.length)];
 
@@ -272,11 +342,10 @@ async function getStreamLinks(fid, customToken = null) {
   }
 
   const sources = JSON.parse(sourcesMatch[1]);
-  return sources.map(source => ({
-    file: source.file,
-    quality: source.label,
-    type: source.type
-  }));
+  
+  // Cache the results before returning
+  streamLinkCache.set(cacheKey, sources);
+  return sources;
 }
 
 async function searchIMDB(title) {
@@ -315,6 +384,7 @@ async function searchIMDB(title) {
   }
 }
 
+// Modify tryUrlBasedId to parallelize year attempts
 async function tryUrlBasedId(title, year, type) {
   const formattedTitle = title.toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
@@ -367,49 +437,53 @@ async function tryUrlBasedId(title, year, type) {
       return aDiff - bDiff;
     });
 
-    // Try all IMDB years in parallel
-    const yearAttempts = imdbResults
-      .filter(result => result.year && result.year !== year)
-      .map(async (result) => {
-        const fallbackUrl = `https://showbox.media/${type}/${prefix}${formattedTitle}-${result.year}`;
-        console.log(`🎯 Trying year ${result.year}`);
-        
-        try {
-          const fallbackResponse = await fetch(getScraperUrl(fallbackUrl));
-          if (!fallbackResponse.ok) return null;
-
-          const fallbackHtml = await fallbackResponse.text();
-          const $fallback = cheerio.load(fallbackHtml);
+    // Try multiple years in parallel instead of sequentially
+    if (imdbResults && imdbResults.length > 0) {
+      const yearAttempts = imdbResults
+        .filter(result => result.year && result.year !== year)
+        .map(async (result) => {
+          const fallbackUrl = `https://showbox.media/${type}/${prefix}${formattedTitle}-${result.year}`;
+          console.log(`🎯 Trying year ${result.year}`);
           
-          const fallbackDetailUrl = $fallback('link[rel="canonical"]').attr('href') || 
-                                  $fallback('.watch-now').attr('href') || 
-                                  $fallback('a[href*="/detail/"]').attr('href');
-                                  
-          if (fallbackDetailUrl) {
-            const fallbackIdMatch = fallbackDetailUrl.match(/\/detail\/(\d+)/);
-            if (fallbackIdMatch) {
-              return {
-                id: fallbackIdMatch[1],
-                url: fallbackUrl,
-                year: result.year
-              };
-            }
-          }
-          return null;
-        } catch (error) {
-          console.error(`❌ Error trying year ${result.year}:`, error);
-          return null;
-        }
-      });
+          try {
+            const fallbackResponse = await fetch(getScraperUrl(fallbackUrl));
+            if (!fallbackResponse.ok) return null;
 
-    // Wait for all attempts to complete and get the first successful result
-    const results = await Promise.all(yearAttempts);
-    const successfulResult = results.find(r => r !== null);
-    
-    if (successfulResult) {
-      urlCache.set(cacheKey, successfulResult.id);
-      console.log(`✅ Found ID via IMDB fallback: ${successfulResult.id} (${successfulResult.url})`);
-      return successfulResult.id;
+            const fallbackHtml = await fallbackResponse.text();
+            const $fallback = cheerio.load(fallbackHtml);
+            
+            const fallbackDetailUrl = $fallback('link[rel="canonical"]').attr('href') || 
+                                    $fallback('.watch-now').attr('href') || 
+                                    $fallback('a[href*="/detail/"]').attr('href');
+                                    
+            if (fallbackDetailUrl) {
+              const fallbackIdMatch = fallbackDetailUrl.match(/\/detail\/(\d+)/);
+              if (fallbackIdMatch) {
+                return {
+                  id: fallbackIdMatch[1],
+                  url: fallbackUrl,
+                  year: result.year
+                };
+              }
+            }
+            return null;
+          } catch (error) {
+            console.error(`❌ Error trying year ${result.year}:`, error);
+            return null;
+          }
+        });
+
+      // Use Promise.allSettled instead of Promise.all to handle failures better
+      const results = await Promise.allSettled(yearAttempts);
+      const successfulResult = results
+        .filter(r => r.status === 'fulfilled' && r.value !== null)
+        .map(r => r.value)[0];
+      
+      if (successfulResult) {
+        urlCache.set(cacheKey, successfulResult.id);
+        console.log(`✅ Found ID via IMDB fallback: ${successfulResult.id} (${successfulResult.url})`);
+        return successfulResult.id;
+      }
     }
   } catch (error) {
     console.error(`❌ Error in tryUrlBasedId:`, error);
@@ -534,10 +608,19 @@ function extractTopQualityStreams(streams) {
   return { primary: null, secondary: null };
 }
 
+// Replace direct upload calls with non-blocking uploads
+// Add this function at an appropriate location in the file
+function backgroundUpload(url, metadata) {
+  // Don't await this - let it run in the background
+  bunnyStreamController.uploadVideoToCollection(url, metadata)
+    .then(() => console.log(`✅ Background upload completed for: ${metadata.title}`))
+    .catch(err => console.error(`❌ Background upload failed: ${err.message}`));
+}
+
 export const showboxController = {
   async getShowboxUrl(req, res) {
     const { type, tmdbId } = req.params;
-    const { season, episode, py, token } = req.query;
+    const { season, episode, py, token, skipUpload, fastMode } = req.query;
     let showboxId = null;
     let tmdbData = null;
     const usePython = py !== undefined;
@@ -704,25 +787,36 @@ export const showboxController = {
 
             // Upload only the highest quality stream to Bunny
             const qualityStreams = extractTopQualityStreams(targetEpisode);
-            if (qualityStreams.primary) {
+            if (!skipUpload && qualityStreams.primary) {
               console.log(`🐰 Uploading ${type === 'movie' ? 'movie' : 'episode'}: ${title} ${type === 'tv' ? `S${season}E${episode}` : ''} [${qualityStreams.primaryQuality}]`);
               
-              try {
-                // Only upload primary (highest) quality
-                bunnyStreamController.uploadVideoToCollection(
-                  qualityStreams.primary,
-                  {
-                    title: `${title}${type === 'tv' ? ` S${season}E${episode}` : ''} (TMDB: ${tmdbId})`,
-                    type: 'tv',
-                    tmdbId,
-                    season: parseInt(season, 10),
-                    episode: parseInt(episode, 10),
-                    quality: qualityStreams.primaryQuality
-                  }
-                );
-              } catch (uploadError) {
-                console.error(`🐰 Upload error: ${uploadError.message}`);
-              }
+              backgroundUpload(qualityStreams.primary, {
+                title: `${title}${type === 'tv' ? ` S${season}E${episode}` : ''} (TMDB: ${tmdbId})`,
+                type: 'tv',
+                tmdbId,
+                season: parseInt(season, 10),
+                episode: parseInt(episode, 10),
+                quality: qualityStreams.primaryQuality
+              });
+            }
+
+            // Fast response mode - send basic response before all processing is complete
+            if (fastMode && streamLinks.length > 0) {
+              // Get just the first working stream and return immediately
+              const fastResponse = {
+                success: true,
+                tmdb_id: tmdbId,
+                type,
+                title,
+                fastMode: true,
+                streams: streamLinks.slice(0, 1)
+              };
+              
+              res.json(fastResponse);
+              
+              // Continue processing in the background
+              console.log('🚀 Fast mode enabled, sending early response');
+              return;
             }
 
             // Helper function to check if response has valid video links
@@ -804,23 +898,15 @@ export const showboxController = {
             
             console.log(`Highest quality URLs found: Primary=${qualityStreams.primary || 'None'}, Secondary=${qualityStreams.secondary || 'None'}`);
             
-            if (qualityStreams.primary) {
+            if (!skipUpload && qualityStreams.primary) {
               console.log(`🐰 Uploading ${type === 'movie' ? 'movie' : 'episode'}: ${title} ${type === 'tv' ? `S${season}E${episode}` : ''} [${qualityStreams.primaryQuality}]`);
               
-              try {
-                // Only upload primary (highest) quality
-                bunnyStreamController.uploadVideoToCollection(
-                  qualityStreams.primary,
-                  {
-                    title: `${title} (TMDB: ${tmdbId})`,
-                    type: 'movie',
-                    tmdbId,
-                    quality: qualityStreams.primaryQuality
-                  }
-                );
-              } catch (uploadError) {
-                console.error(`🐰 Upload error: ${uploadError.message}`);
-              }
+              backgroundUpload(qualityStreams.primary, {
+                title: `${title} (TMDB: ${tmdbId})`,
+                type: 'movie',
+                tmdbId,
+                quality: qualityStreams.primaryQuality
+              });
             }
           }
 
@@ -922,25 +1008,36 @@ export const showboxController = {
 
         // Upload only the highest quality stream to Bunny
         const qualityStreams = extractTopQualityStreams(targetEpisode);
-        if (qualityStreams.primary) {
+        if (!skipUpload && qualityStreams.primary) {
           console.log(`🐰 Uploading ${type === 'movie' ? 'movie' : 'episode'}: ${title} ${type === 'tv' ? `S${season}E${episode}` : ''} [${qualityStreams.primaryQuality}]`);
           
-          try {
-            // Only upload primary (highest) quality
-            bunnyStreamController.uploadVideoToCollection(
-              qualityStreams.primary,
-              {
-                title: `${title}${type === 'tv' ? ` S${season}E${episode}` : ''} (TMDB: ${tmdbId})`,
-                type: 'tv',
-                tmdbId,
-                season: parseInt(season, 10),
-                episode: parseInt(episode, 10),
-                quality: qualityStreams.primaryQuality
-              }
-            );
-          } catch (uploadError) {
-            console.error(`🐰 Upload error: ${uploadError.message}`);
-          }
+          backgroundUpload(qualityStreams.primary, {
+            title: `${title}${type === 'tv' ? ` S${season}E${episode}` : ''} (TMDB: ${tmdbId})`,
+            type: 'tv',
+            tmdbId,
+            season: parseInt(season, 10),
+            episode: parseInt(episode, 10),
+            quality: qualityStreams.primaryQuality
+          });
+        }
+
+        // Fast response mode - send basic response before all processing is complete
+        if (fastMode && streamLinks.length > 0) {
+          // Get just the first working stream and return immediately
+          const fastResponse = {
+            success: true,
+            tmdb_id: tmdbId,
+            type,
+            title,
+            fastMode: true,
+            streams: streamLinks.slice(0, 1)
+          };
+          
+          res.json(fastResponse);
+          
+          // Continue processing in the background
+          console.log('🚀 Fast mode enabled, sending early response');
+          return;
         }
 
         // Helper function to check if response has valid video links
@@ -1022,23 +1119,15 @@ export const showboxController = {
         
         console.log(`Highest quality URLs found: Primary=${qualityStreams.primary || 'None'}, Secondary=${qualityStreams.secondary || 'None'}`);
         
-        if (qualityStreams.primary) {
+        if (!skipUpload && qualityStreams.primary) {
           console.log(`🐰 Uploading ${type === 'movie' ? 'movie' : 'episode'}: ${title} ${type === 'tv' ? `S${season}E${episode}` : ''} [${qualityStreams.primaryQuality}]`);
           
-          try {
-            // Only upload primary (highest) quality
-            bunnyStreamController.uploadVideoToCollection(
-              qualityStreams.primary,
-              {
-                title: `${title} (TMDB: ${tmdbId})`,
-                type: 'movie',
-                tmdbId,
-                quality: qualityStreams.primaryQuality
-              }
-            );
-          } catch (uploadError) {
-            console.error(`🐰 Upload error: ${uploadError.message}`);
-          }
+          backgroundUpload(qualityStreams.primary, {
+            title: `${title} (TMDB: ${tmdbId})`,
+            type: 'movie',
+            tmdbId,
+            quality: qualityStreams.primaryQuality
+          });
         }
       }
 

@@ -158,13 +158,13 @@ async function getVideoUrlDirect(url) {
     try {
       if (url.includes('/movie/')) {
         const id = url.split('/movie/')[1].split('/')[0];
-        apiUrl = `https://vidlink.pro/api/b/movie/${id}`;
+        apiUrl = `https://vidlink.pro/api/b/movie/${id}?multiLang=0`;
       } else if (url.includes('/tv/')) {
         const parts = url.split('/tv/')[1].split('/');
         const id = parts[0];
         const season = parts[1];
         const episode = parts[2];
-        apiUrl = `https://vidlink.pro/api/b/tv/${id}/${season}/${episode}`;
+        apiUrl = `https://vidlink.pro/api/b/tv/${id}/${season}/${episode}?multiLang=0`;
       } else {
         throw new Error('Unsupported URL format for direct API request');
       }
@@ -225,24 +225,68 @@ async function processApiResponse(data) {
   const startTime = performance.now();
   const results = [];
   
-  if (data.stream && data.stream.playlist) {
-    const videoUrl = data.stream.playlist;
-    const subtitles = (data.stream.captions || []).map(caption => ({
-      label: caption.language,
-      file: caption.url
-    }));
-
-    results.push({
-      video_urls: [videoUrl],
-      subtitles: subtitles,
-      qualities: {
-        '1080': `${videoUrl.split('playlist.m3u8')[0]}1080/index.m3u8`,
-        '720': `${videoUrl.split('playlist.m3u8')[0]}720/index.m3u8`,
-        '480': `${videoUrl.split('playlist.m3u8')[0]}480/index.m3u8`,
-        '360': `${videoUrl.split('playlist.m3u8')[0]}360/index.m3u8`
+  console.log('[Debug] Processing API response:', JSON.stringify(data).substring(0, 200) + '...');
+  
+  if (data && data.stream) {
+    const streamData = data.stream;
+    let videoUrls = [];
+    let subtitles = [];
+    let qualities = {};
+    
+    // Handle HLS playlist format
+    if (streamData.type === "hls" && streamData.playlist) {
+      videoUrls = [streamData.playlist];
+      
+      // Extract qualities for HLS streams
+      if (streamData.playlist.includes('playlist.m3u8')) {
+        qualities = {
+          '1080': `${streamData.playlist.split('playlist.m3u8')[0]}1080/index.m3u8`,
+          '720': `${streamData.playlist.split('playlist.m3u8')[0]}720/index.m3u8`,
+          '480': `${streamData.playlist.split('playlist.m3u8')[0]}480/index.m3u8`,
+          '360': `${streamData.playlist.split('playlist.m3u8')[0]}360/index.m3u8`
+        };
       }
-    });
-  } else if (data.source) {
+      
+      // Handle captions array for HLS streams
+      if (streamData.captions && Array.isArray(streamData.captions)) {
+        subtitles = streamData.captions.map(caption => ({
+          label: caption.language,
+          file: caption.url
+        }));
+      }
+    } 
+    // Handle direct file format with qualities
+    else if (streamData.type === "file" && streamData.qualities) {
+      // Extract available qualities
+      for (const [key, value] of Object.entries(streamData.qualities)) {
+        if (value.url) {
+          qualities[key] = value.url;
+          // Add the highest quality to videoUrls
+          if (videoUrls.length === 0) {
+            videoUrls = [value.url];
+          }
+        }
+      }
+      
+      // Handle captions
+      if (streamData.captions && Array.isArray(streamData.captions)) {
+        subtitles = streamData.captions.map(caption => ({
+          label: caption.language,
+          file: caption.url
+        }));
+      }
+    }
+    
+    if (videoUrls.length > 0) {
+      results.push({
+        video_urls: videoUrls,
+        subtitles: subtitles,
+        qualities: qualities
+      });
+    }
+  } 
+  // Fallback for older API format
+  else if (data.source) {
     if (Array.isArray(data.source)) {
       data.source.forEach(src => {
         if (src.file) results.push({
@@ -258,7 +302,7 @@ async function processApiResponse(data) {
     }
   }
 
-  console.log(`[Time] Response processing took: ${getTimeDiff(startTime)}`);
+  console.log(`[Time] Response processing took: ${getTimeDiff(startTime)}, found ${results.length} results`);
   return results;
 }
 

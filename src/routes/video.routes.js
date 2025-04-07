@@ -14,6 +14,7 @@ import { faselhdController } from '../controllers/faselhd.controller.js';
 import { alootvController } from '../controllers/alooytv.controller.js';
 import { bunnyStreamController } from '../controllers/bunny.controller.js';
 import { subtitleCache } from '../utils/cache-manager.js';
+import { movieboxController } from '../controllers/moviebox.controller.js';
 
 const router = express.Router();
 
@@ -127,5 +128,9 @@ router.post('/subtitles/clear-cache', async (req, res) => {
     });
   }
 });
+
+// MovieBox routes
+router.get('/moviebox/movie/:tmdbId', movieboxController.getMovieByTmdbId.bind(movieboxController));
+router.get('/moviebox/tv/:tmdbId', movieboxController.getTvEpisodeByTmdbId.bind(movieboxController));
 
 export default router;

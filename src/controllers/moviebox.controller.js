@@ -67,7 +67,6 @@ class MovieBoxController {
     // Select a random user agent
     const randomAgent = userAgents[Math.floor(Math.random() * userAgents.length)];
     this.headers['User-Agent'] = randomAgent;
-    console.log('Rotated MovieBox user agent to:', randomAgent);
   }
 
   /**
@@ -76,7 +75,6 @@ class MovieBoxController {
    */
   async getBrowser() {
     if (!browserInstance) {
-      console.log('Creating new browser instance for MovieBox');
       browserInstance = await puppeteerExtra.launch({
         headless: "new",  // Use new headless mode
         defaultViewport: {
@@ -108,7 +106,6 @@ class MovieBoxController {
    */
   async cleanupBrowser() {
     if (browserInstance && Date.now() - browserLastUsed > BROWSER_IDLE_TIMEOUT) {
-      console.log('Closing idle browser instance');
       await browserInstance.close();
       browserInstance = null;
     }
@@ -165,7 +162,6 @@ class MovieBoxController {
     }
     
     const searchUrl = `${this.searchUrl}?keyword=${encodeURIComponent(query)}`;
-    console.log(`Searching MovieBox: ${searchUrl}`);
     
     let browser, page;
     try {
@@ -188,8 +184,6 @@ class MovieBoxController {
       await this.applyEnhancedPageHeaders(page);
       await page.setDefaultNavigationTimeout(30000);
       
-      console.log(`Navigating to: ${searchUrl}`);
-      
       // Navigate to search page with faster load strategy
       const response = await page.goto(searchUrl, { 
         waitUntil: 'domcontentloaded', 
@@ -202,9 +196,7 @@ class MovieBoxController {
       }
       
       // Wait for content to load
-      await page.waitForSelector('.pc-card', { timeout: 10000 }).catch(() => {
-        console.log('Search results selector not found, page might be empty');
-      });
+      await page.waitForSelector('.pc-card', { timeout: 10000 }).catch(() => {});
       
       // Extract search results
       const searchResults = await page.evaluate(() => {
@@ -212,8 +204,6 @@ class MovieBoxController {
         const cards = document.querySelectorAll('.pc-card');
         
         if (cards.length === 0) {
-          // Log detailed page structure for debugging if no results found
-          console.log('No cards found on page');
           return shows;
         }
         
@@ -251,13 +241,6 @@ class MovieBoxController {
       console.error(`Error searching MovieBox: ${error.message}`);
       
       if (page) {
-        try {
-          const content = await page.content();
-          console.error(`Page content sample: ${content.substring(0, 500)}...`);
-        } catch (contentError) {
-          console.error(`Could not capture page content: ${contentError.message}`);
-        }
-        
         await page.close().catch(() => {});
       }
       
@@ -273,37 +256,24 @@ class MovieBoxController {
   async enhancedSearch(details) {
     const title = details.title || details.name || '';
     const originalTitle = details.original_title || details.original_name || '';
-    const allSearchAttempts = [];
     let searchResults = [];
-    
-    console.log(`Starting enhanced MovieBox search for: "${title}" (Original: "${originalTitle}")`);
     
     // Strategy 1: Try the full title first
     try {
       searchResults = await this.search(title);
-      console.log(`Strategy 1 (Full title): Found ${searchResults.length} results`);
-      allSearchAttempts.push({ query: title, results: searchResults.length });
-      
       if (searchResults.length > 0) {
         return searchResults;
       }
-    } catch (error) {
-      console.error(`Error in strategy 1: ${error.message}`);
-    }
+    } catch (error) {}
     
     // Strategy 2: Try the original title
     if (originalTitle && originalTitle !== title) {
       try {
         searchResults = await this.search(originalTitle);
-        console.log(`Strategy 2 (Original title): Found ${searchResults.length} results`);
-        allSearchAttempts.push({ query: originalTitle, results: searchResults.length });
-        
         if (searchResults.length > 0) {
           return searchResults;
         }
-      } catch (error) {
-        console.error(`Error in strategy 2: ${error.message}`);
-      }
+      } catch (error) {}
     }
     
     // Strategy 3: Try main part of the title (before any colon or dash)
@@ -312,15 +282,10 @@ class MovieBoxController {
       const mainTitle = mainTitleMatch[1].trim();
       try {
         searchResults = await this.search(mainTitle);
-        console.log(`Strategy 3 (Main part of title): "${mainTitle}" found ${searchResults.length} results`);
-        allSearchAttempts.push({ query: mainTitle, results: searchResults.length });
-        
         if (searchResults.length > 0) {
           return searchResults;
         }
-      } catch (error) {
-        console.error(`Error in strategy 3: ${error.message}`);
-      }
+      } catch (error) {}
     }
     
     // Strategy 4: Try with the first few words of the title
@@ -329,18 +294,12 @@ class MovieBoxController {
       const shortTitle = words.slice(0, 3).join(' '); // First 3 words
       try {
         searchResults = await this.search(shortTitle);
-        console.log(`Strategy 4 (First few words): "${shortTitle}" found ${searchResults.length} results`);
-        allSearchAttempts.push({ query: shortTitle, results: searchResults.length });
-        
         if (searchResults.length > 0) {
           return searchResults;
         }
-      } catch (error) {
-        console.error(`Error in strategy 4: ${error.message}`);
-      }
+      } catch (error) {}
     }
     
-    console.log('All search strategies exhausted. Search attempts:', allSearchAttempts);
     return [];
   }
 
@@ -351,16 +310,11 @@ class MovieBoxController {
    */
   async selectHighestQuality(page) {
     try {
-      console.log('Checking for quality selector...');
-      
       // Check if quality selector exists
       const qualitySelector = await page.$('.art-control-quality');
       if (!qualitySelector) {
-        console.log('No quality selector found on page');
         return;
       }
-      
-      console.log('Quality selector found, attempting to select highest quality');
       
       // Click on the quality selector to open the dropdown
       await qualitySelector.click();
@@ -372,11 +326,8 @@ class MovieBoxController {
       const qualityOptions = await page.$$('.art-selector-item');
       
       if (!qualityOptions || qualityOptions.length === 0) {
-        console.log('No quality options found');
         return;
       }
-      
-      console.log(`Found ${qualityOptions.length} quality options`);
       
       // Get the quality values/labels
       const qualities = await Promise.all(qualityOptions.map(async (option) => {
@@ -387,8 +338,6 @@ class MovieBoxController {
           value: text.toLowerCase() // Convert to lowercase for easier comparison
         };
       }));
-      
-      console.log('Available qualities:', qualities.map(q => q.text));
       
       // Define quality ranking
       const qualityRanking = {
@@ -427,17 +376,12 @@ class MovieBoxController {
         }
       }
       
-      console.log(`Selected highest quality: ${highestQuality.text}`);
-      
       // Click on the highest quality option
       await highestQuality.element.click();
       
       // Wait for video to adjust to new quality
       await delay(2000);
-      
-      console.log('Quality selection complete');
     } catch (error) {
-      console.error(`Error selecting highest quality: ${error.message}`);
       // Continue execution even if quality selection fails
     }
   }
@@ -449,8 +393,6 @@ class MovieBoxController {
    */
   async getVideoUrl(page) {
     try {
-      console.log(`Attempting to extract video URL from: ${page.url()}`);
-      
       // Capture network requests to find video URLs
       const videoUrls = [];
       page.on('response', async (response) => {
@@ -463,30 +405,25 @@ class MovieBoxController {
             url.includes('.m3u8') || 
             url.includes('/playlist/') ||
             url.endsWith('/master.json')) {
-          console.log(`Potential video URL found in network: ${url}`);
           videoUrls.push(url);
         }
       });
       
-      // Longer wait for the player to initialize
-      console.log('Waiting for player to initialize...');
+      // Wait for the player to initialize
       await delay(3000);
       
-      // Try to find player container first
+      // Try to find player container
       await page.waitForSelector('.pc-player-cot, .player-container, #player, .art-video-player', { 
         timeout: 10000 
-      }).catch(() => {
-        console.log('Player container not found, will try direct video element');
-      });
+      }).catch(() => {});
       
       // Wait longer for video to appear
       await delay(2000);
       
-      // NEW: Try to select the highest quality available
+      // Try to select the highest quality available
       await this.selectHighestQuality(page);
       
       // First try: DOM-based approach with multiple selectors
-      console.log('Trying DOM-based video extraction...');
       let videoUrl = await page.evaluate(() => {
         // Check various selectors that might contain video URLs
         const selectors = [
@@ -508,13 +445,11 @@ class MovieBoxController {
           for (const el of elements) {
             // For video or source elements
             if (el.src && (el.src.includes('http') || el.src.startsWith('blob:'))) {
-              console.log(`Found video URL in ${selector}:`, el.src);
               return el.src;
             }
             
             // For iframes
             if (el.tagName === 'IFRAME' && el.src) {
-              console.log(`Found iframe source:`, el.src);
               return el.src; // We'll need to follow this iframe
             }
             
@@ -550,7 +485,6 @@ class MovieBoxController {
       
       // If we found a video URL through DOM methods, return it
       if (videoUrl) {
-        console.log(`Found video URL through DOM: ${videoUrl}`);
         return videoUrl;
       }
       
@@ -559,17 +493,14 @@ class MovieBoxController {
         // Prefer .mp4 over other formats
         const mp4Urls = videoUrls.filter(url => url.includes('.mp4'));
         if (mp4Urls.length > 0) {
-          console.log(`Using MP4 URL from network capture: ${mp4Urls[0]}`);
           return mp4Urls[0];
         }
         
-        console.log(`Using URL from network capture: ${videoUrls[0]}`);
         return videoUrls[0];
       }
       
       // Third approach: Try clicking on the play button if visible
-      console.log('Trying to interact with player controls...');
-      await delay(1000); // Using our custom delay
+      await delay(1000);
       
       const playButtonSelectors = [
         '.vjs-big-play-button', 
@@ -582,9 +513,8 @@ class MovieBoxController {
       for (const selector of playButtonSelectors) {
         const playButton = await page.$(selector);
         if (playButton) {
-          console.log(`Found play button (${selector}), clicking it...`);
-          await playButton.click().catch(() => console.log(`Failed to click ${selector}`));
-          await delay(2000); // Using our custom delay
+          await playButton.click().catch(() => {});
+          await delay(2000);
           break;
         }
       }
@@ -616,25 +546,15 @@ class MovieBoxController {
       });
       
       if (videoUrl) {
-        console.log(`Found video URL through player API or global scan: ${videoUrl}`);
         return videoUrl;
       }
       
-      // If we're here, we haven't found the video URL. Take a screenshot for debugging
+      // If we're here, we haven't found the video URL
       const timestamp = new Date().getTime();
       const screenshotPath = `./moviebox-debug-${timestamp}.png`;
       await page.screenshot({ path: screenshotPath, fullPage: true });
-      console.log(`Saved screenshot for debugging: ${screenshotPath}`);
       
-      console.error('FAILED TO EXTRACT VIDEO URL');
-      console.error('Current page URL:', page.url());
-      console.error('Page title:', await page.title());
-      
-      // Check if we're on a page that might require user interaction
-      const pageContentSample = await page.evaluate(() => document.body.innerText.substring(0, 500));
-      console.error('Page content sample:', pageContentSample);
-      
-      throw new Error('No video URL found on page. A screenshot has been saved for debugging.');
+      throw new Error('No video URL found on page');
     } catch (error) {
       console.error(`Error extracting video URL: ${error.message}`);
       throw error;
@@ -657,8 +577,6 @@ class MovieBoxController {
       // Get title for better search results
       const title = movieDetails.title || movieDetails.original_title;
       
-      console.log(`Processing movie request for: "${title}" (TMDB ID: ${tmdbId})`);
-      
       // Search for the movie on MovieBox
       const searchResults = await this.enhancedSearch(movieDetails);
       
@@ -677,7 +595,6 @@ class MovieBoxController {
       
       // Get the first result (most relevant)
       const movie = searchResults[0];
-      console.log(`Found movie: "${movie.title}" (Rating: ${movie.rating})`);
       
       // Now we need to click on the result and get the video URL
       browser = await this.getBrowser();
@@ -695,7 +612,6 @@ class MovieBoxController {
             url.includes('.m3u8') || 
             url.includes('playlist') || 
             url.includes('player')) {
-          console.log(`Allowing resource: ${url}`);
           request.continue();
         } 
         // Block less important resources
@@ -711,7 +627,6 @@ class MovieBoxController {
       
       // Navigate to search page
       const searchUrl = `${this.searchUrl}?keyword=${encodeURIComponent(title)}`;
-      console.log(`Navigating to search page: ${searchUrl}`);
       await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
       
       // Wait for search results to load
@@ -731,8 +646,6 @@ class MovieBoxController {
         return titleEl ? titleEl.textContent.trim() : 'Unknown';
       }, cards[movie.cardIndex]);
       
-      console.log(`Clicking on movie card: "${cardTitle}" (index ${movie.cardIndex})`);
-      
       // Click on the "Watch now" button for this card
       const watchButton = await cards[movie.cardIndex].$('.pc-card-btn');
       if (!watchButton) {
@@ -742,13 +655,10 @@ class MovieBoxController {
       await watchButton.click();
       
       // Wait for navigation to complete
-      console.log('Waiting for navigation after card click...');
       await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 45000 });
       
-      console.log(`Navigated to movie page: ${page.url()}`);
-      
       // Wait a bit for page to initialize
-      await delay(2000); // Using our custom delay function
+      await delay(2000);
       
       // Get video URL with our enhanced method
       const videoUrl = await this.getVideoUrl(page);
@@ -775,24 +685,8 @@ class MovieBoxController {
       
       if (page) {
         try {
-          const url = await page.url();
-          const title = await page.title();
-          const content = await page.content();
-          
-          console.error(`Current URL: ${url}`);
-          console.error(`Page title: ${title}`);
-          console.error(`Page content sample: ${content.substring(0, 500)}...`);
-          
-          // Take a screenshot for debugging
-          const timestamp = new Date().getTime();
-          const screenshotPath = `./moviebox-error-${timestamp}.png`;
-          await page.screenshot({ path: screenshotPath, fullPage: true });
-          console.error(`Error screenshot saved to: ${screenshotPath}`);
-          
           await page.close().catch(() => {});
-        } catch (contentError) {
-          console.error(`Could not capture page details: ${contentError.message}`);
-        }
+        } catch (contentError) {}
       }
       
       return res.status(500).json({
@@ -833,7 +727,6 @@ class MovieBoxController {
       
       // Get TV details from TMDB
       const tvDetails = await this.getTVDetailsFromTMDB(tmdbId);
-      console.log(`Processing TV request for: "${tvDetails.name}" (TMDB ID: ${tmdbId}, Season: ${season}, Episode: ${episode})`);
       
       // Get title for better search results
       const title = tvDetails.name || tvDetails.original_name;
@@ -858,7 +751,6 @@ class MovieBoxController {
       
       // Get the first result (most relevant)
       const show = searchResults[0];
-      console.log(`Found TV show: "${show.title}" (Rating: ${show.rating})`);
       
       // Now we need to click on the result, select season and episode, and get the video URL
       browser = await this.getBrowser();
@@ -891,7 +783,6 @@ class MovieBoxController {
       
       // Navigate to search page
       const searchUrl = `${this.searchUrl}?keyword=${encodeURIComponent(title)}`;
-      console.log(`Navigating to search page: ${searchUrl}`);
       await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
       
       // Wait for search results to load
@@ -905,14 +796,6 @@ class MovieBoxController {
         throw new Error(`Card at index ${show.cardIndex} not found, only ${cards.length} cards available`);
       }
       
-      // Get actual card title to confirm selection
-      const cardTitle = await page.evaluate(el => {
-        const titleEl = el.querySelector('.pc-card-title');
-        return titleEl ? titleEl.textContent.trim() : 'Unknown';
-      }, cards[show.cardIndex]);
-      
-      console.log(`Clicking on TV show card: "${cardTitle}" (index ${show.cardIndex})`);
-      
       // Click on the "Watch now" button for this card
       const watchButton = await cards[show.cardIndex].$('.pc-card-btn');
       if (!watchButton) {
@@ -922,18 +805,14 @@ class MovieBoxController {
       await watchButton.click();
       
       // Wait for navigation to complete
-      console.log('Waiting for navigation after card click...');
       await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 45000 });
       
-      console.log(`Navigated to TV show page: ${page.url()}`);
-      
       // Wait a bit for page to initialize
-      await delay(2000); // Using our custom delay function
+      await delay(2000);
       
       // Find and click on the season
       try {
         // Try to find the season element
-        console.log(`Looking for season ${season} selector...`);
         await page.waitForSelector('.pc-se-box', { timeout: 15000 });
         
         // Check if season elements exist
@@ -943,16 +822,12 @@ class MovieBoxController {
           throw new Error('No seasons found on page');
         }
         
-        console.log(`Found ${seasonElements.length} seasons. Looking for S${season.toString().padStart(2, '0')}`);
-        
         // Find correct season
         let foundSeasonElement = false;
         for (let i = 0; i < seasonElements.length; i++) {
           const seasonText = await page.evaluate(el => el.textContent.trim(), seasonElements[i]);
-          console.log(`Season ${i+1} text: "${seasonText}"`);
           
           if (seasonText === `S${season.toString().padStart(2, '0')}`) {
-            console.log(`Clicking on season ${season}`);
             await seasonElements[i].click();
             foundSeasonElement = true;
             break;
@@ -964,17 +839,15 @@ class MovieBoxController {
         }
         
       } catch (seasonError) {
-        console.error(`Error selecting season: ${seasonError.message}`);
         throw new Error(`Failed to select season ${season}: ${seasonError.message}`);
       }
       
       // Wait a moment for the episodes to update
-      await delay(2000); // Using our custom delay function
+      await delay(2000);
       
       // Find and click on the episode
       try {
         // Wait for the episode container
-        console.log(`Looking for episode ${episode} selector...`);
         await page.waitForSelector('.pc-ep-contain', { timeout: 15000 });
         
         // Check if episode elements exist
@@ -984,8 +857,6 @@ class MovieBoxController {
           throw new Error('No episodes found on page');
         }
         
-        console.log(`Found ${episodeElements.length} episodes. Looking for episode ${episode.toString().padStart(2, '0')}`);
-        
         // Find correct episode
         let foundEpisodeElement = false;
         for (let i = 0; i < episodeElements.length; i++) {
@@ -994,10 +865,7 @@ class MovieBoxController {
             return span ? span.textContent.trim() : '';
           }, episodeElements[i]);
           
-          console.log(`Episode ${i+1} text: "${episodeText}"`);
-          
           if (episodeText === episode.toString().padStart(2, '0')) {
-            console.log(`Clicking on episode ${episode}`);
             await episodeElements[i].click();
             foundEpisodeElement = true;
             break;
@@ -1009,12 +877,11 @@ class MovieBoxController {
         }
         
       } catch (episodeError) {
-        console.error(`Error selecting episode: ${episodeError.message}`);
         throw new Error(`Failed to select episode ${episode}: ${episodeError.message}`);
       }
       
       // Wait for video player to load after selecting episode
-      await delay(3000); // Using our custom delay function
+      await delay(3000);
       
       // Get video URL
       const videoUrl = await this.getVideoUrl(page);
@@ -1042,24 +909,8 @@ class MovieBoxController {
       
       if (page) {
         try {
-          const url = await page.url();
-          const title = await page.title();
-          const content = await page.content();
-          
-          console.error(`Current URL: ${url}`);
-          console.error(`Page title: ${title}`);
-          console.error(`Page content sample: ${content.substring(0, 500)}...`);
-          
-          // Take a screenshot for debugging
-          const timestamp = new Date().getTime();
-          const screenshotPath = `./moviebox-tv-error-${timestamp}.png`;
-          await page.screenshot({ path: screenshotPath, fullPage: true });
-          console.error(`Error screenshot saved to: ${screenshotPath}`);
-          
           await page.close().catch(() => {});
-        } catch (contentError) {
-          console.error(`Could not capture page details: ${contentError.message}`);
-        }
+        } catch (contentError) {}
       }
       
       return res.status(500).json({

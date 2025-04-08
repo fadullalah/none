@@ -74,31 +74,45 @@ class MovieBoxController {
    * @returns {Promise<Browser>} Puppeteer browser instance
    */
   async getBrowser() {
-    if (!browserInstance) {
-      browserInstance = await puppeteerExtra.launch({
-        headless: "new",  // Use new headless mode
-        defaultViewport: {
-          width: 1366,
-          height: 768
-        },
-        args: [
-          '--no-sandbox',
-          '--disable-setuid-sandbox',
-          '--disable-web-security',
-          '--disable-features=IsolateOrigins,site-per-process',
-          '--disable-dev-shm-usage',
-          '--js-flags=--expose-gc',
-          '--disable-gpu',
-          '--window-size=1366,768',
-          '--disable-notifications',
-          '--disable-infobars'
-        ],
-        ignoreDefaultArgs: ['--enable-automation'] // Hide automation
-      });
+    try {
+      if (!browserInstance || !browserInstance.process() || browserInstance.process().killed) {
+        if (browserInstance) {
+          try {
+            await browserInstance.close().catch(() => {});
+          } catch (err) {} 
+          browserInstance = null;
+        }
+        
+        browserInstance = await puppeteerExtra.launch({
+          headless: "new",  // Use new headless mode
+          defaultViewport: {
+            width: 1366,
+            height: 768
+          },
+          args: [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-web-security',
+            '--disable-features=IsolateOrigins,site-per-process',
+            '--disable-dev-shm-usage',
+            '--js-flags=--expose-gc',
+            '--disable-gpu',
+            '--window-size=1366,768',
+            '--disable-notifications',
+            '--disable-infobars',
+            '--disable-dev-shm-usage',  // Add to avoid crash in containerized environments
+            '--no-zygote'  // Add to improve stability
+          ],
+          ignoreDefaultArgs: ['--enable-automation'] // Hide automation
+        });
+      }
+      
+      browserLastUsed = Date.now();
+      return browserInstance;
+    } catch (error) {
+      console.error(`Error creating browser instance: ${error.message}`);
+      throw error;
     }
-    
-    browserLastUsed = Date.now();
-    return browserInstance;
   }
 
   /**
@@ -106,8 +120,13 @@ class MovieBoxController {
    */
   async cleanupBrowser() {
     if (browserInstance && Date.now() - browserLastUsed > BROWSER_IDLE_TIMEOUT) {
-      await browserInstance.close();
-      browserInstance = null;
+      try {
+        await browserInstance.close();
+      } catch (err) {
+        console.error('Error closing browser:', err.message);
+      } finally {
+        browserInstance = null;
+      }
     }
   }
 
@@ -412,146 +431,87 @@ class MovieBoxController {
       // Wait for the player to initialize
       await delay(3000);
       
-      // Try to find player container
-      await page.waitForSelector('.pc-player-cot, .player-container, #player, .art-video-player', { 
-        timeout: 10000 
-      }).catch(() => {});
-      
-      // Wait longer for video to appear
-      await delay(2000);
-      
-      // Try to select the highest quality available
-      await this.selectHighestQuality(page);
-      
-      // First try: DOM-based approach with multiple selectors
+      // First try: Check specifically for .art-video element (from the example)
       let videoUrl = await page.evaluate(() => {
-        // Check various selectors that might contain video URLs
-        const selectors = [
-          'video', 
-          'video source',
-          'iframe[src*="player"]',
-          'iframe[src*="embed"]',
-          '.pc-player-cot video',
-          '.player-container video',
-          '#player video',
-          '.video-js video',
-          '.art-video-player video',
-          '[data-video-url]',
-          '[data-src]'
-        ];
-        
-        for (const selector of selectors) {
-          const elements = document.querySelectorAll(selector);
-          for (const el of elements) {
-            // For video or source elements
-            if (el.src && (el.src.includes('http') || el.src.startsWith('blob:'))) {
-              return el.src;
-            }
-            
-            // For iframes
-            if (el.tagName === 'IFRAME' && el.src) {
-              return el.src; // We'll need to follow this iframe
-            }
-            
-            // For elements with data attributes
-            if (el.dataset) {
-              if (el.dataset.videoUrl) return el.dataset.videoUrl;
-              if (el.dataset.src) return el.dataset.src;
-            }
-          }
+        const artVideo = document.querySelector('.art-video');
+        if (artVideo && artVideo.src && artVideo.src.length > 0) {
+          return artVideo.src;
         }
-        
-        // Check for JSON data in script tags that might contain video URLs
-        const scripts = document.querySelectorAll('script:not([src])');
-        for (const script of scripts) {
-          const content = script.textContent;
-          if (content && (content.includes('.mp4') || content.includes('.m3u8'))) {
-            const mp4Match = content.match(/"(https?:\/\/[^"]+\.mp4[^"]*)"/);
-            if (mp4Match) return mp4Match[1];
-            
-            const m3u8Match = content.match(/"(https?:\/\/[^"]+\.m3u8[^"]*)"/);
-            if (m3u8Match) return m3u8Match[1];
-          }
-        }
-        
-        // Additional check for any video-like URL in the page
-        const videoRegex = /(https?:\/\/[^"'\s]+\.(mp4|m3u8)[^"'\s]*)/i;
-        const pageText = document.documentElement.outerHTML;
-        const videoMatch = pageText.match(videoRegex);
-        if (videoMatch) return videoMatch[1];
-        
         return null;
       });
       
-      // If we found a video URL through DOM methods, return it
       if (videoUrl) {
+        console.log('Found video URL from .art-video element:', videoUrl);
         return videoUrl;
       }
       
-      // Second approach: Check if we captured any video URLs through network monitoring
+      console.log('Art-video element not found, trying alternative methods');
+      
+      // Try clicking on the video player area to start playback
+      await page.evaluate(() => {
+        const playerElements = [
+          '.art-video-player',
+          '.pc-player-cot',
+          '.player-container',
+          '#player'
+        ];
+        
+        for (const selector of playerElements) {
+          const player = document.querySelector(selector);
+          if (player) {
+            player.click();
+            break;
+          }
+        }
+      });
+      
+      await delay(2000);
+      
+      // Check again for the art-video element after clicking
+      videoUrl = await page.evaluate(() => {
+        const artVideo = document.querySelector('.art-video');
+        if (artVideo && artVideo.src && artVideo.src.length > 0) {
+          return artVideo.src;
+        }
+        return null;
+      });
+      
+      if (videoUrl) {
+        console.log('Found video URL after clicking player:', videoUrl);
+        return videoUrl;
+      }
+      
+      // Check for all video elements on the page
+      videoUrl = await page.evaluate(() => {
+        const videoElements = document.querySelectorAll('video');
+        for (const video of videoElements) {
+          if (video.src && video.src.length > 0) {
+            return video.src;
+          }
+        }
+        return null;
+      });
+      
+      if (videoUrl) {
+        console.log('Found video URL from generic video element:', videoUrl);
+        return videoUrl;
+      }
+      
+      // Check if any network requests captured video URLs
       if (videoUrls.length > 0) {
         // Prefer .mp4 over other formats
         const mp4Urls = videoUrls.filter(url => url.includes('.mp4'));
         if (mp4Urls.length > 0) {
+          console.log('Found MP4 URL from network requests:', mp4Urls[0]);
           return mp4Urls[0];
         }
         
+        console.log('Found video URL from network requests:', videoUrls[0]);
         return videoUrls[0];
       }
       
-      // Third approach: Try clicking on the play button if visible
-      await delay(1000);
-      
-      const playButtonSelectors = [
-        '.vjs-big-play-button', 
-        '.play-button',
-        '.pc-player-cot .play',
-        '[aria-label="Play"]',
-        '.player-control-play'
-      ];
-      
-      for (const selector of playButtonSelectors) {
-        const playButton = await page.$(selector);
-        if (playButton) {
-          await playButton.click().catch(() => {});
-          await delay(2000);
-          break;
-        }
-      }
-      
-      // Fourth approach: Try executing player API if possible
-      videoUrl = await page.evaluate(() => {
-        // Try to access player objects
-        if (window.player && typeof window.player.src === 'function') {
-          return window.player.src();
-        } else if (window.videojs && document.querySelector('.video-js')) {
-          const vjsPlayer = window.videojs(document.querySelector('.video-js').id);
-          if (vjsPlayer && vjsPlayer.src) return vjsPlayer.src();
-        }
-        
-        // Last resort: check all src attributes in the page
-        const allElements = document.querySelectorAll('*[src]');
-        for (const el of allElements) {
-          if (el.src && (
-            el.src.includes('.mp4') || 
-            el.src.includes('.m3u8') || 
-            el.src.includes('/playlist') ||
-            el.src.startsWith('blob:')
-          )) {
-            return el.src;
-          }
-        }
-        
-        return null;
-      });
-      
-      if (videoUrl) {
-        return videoUrl;
-      }
-      
-      // If we're here, we haven't found the video URL
-      const timestamp = new Date().getTime();
-      const screenshotPath = `./moviebox-debug-${timestamp}.png`;
+      // Take a screenshot for debugging
+      const screenshotPath = `./video-player-debug-${Date.now()}.png`;
       await page.screenshot({ path: screenshotPath, fullPage: true });
       
       throw new Error('No video URL found on page');
@@ -713,6 +673,8 @@ class MovieBoxController {
       const season = parseInt(req.query.season, 10);
       const episode = parseInt(req.query.episode, 10);
       
+      console.log(`Processing request for TMDB ID: ${tmdbId}, Season: ${season}, Episode: ${episode}`);
+      
       if (isNaN(season) || isNaN(episode)) {
         return res.status(400).json({
           success: false,
@@ -810,37 +772,11 @@ class MovieBoxController {
       // Wait a bit for page to initialize
       await delay(2000);
       
-      // Find and click on the season
-      try {
-        // Try to find the season element
-        await page.waitForSelector('.pc-se-box', { timeout: 15000 });
-        
-        // Check if season elements exist
-        const seasonElements = await page.$$('.pc-se');
-        
-        if (seasonElements.length === 0) {
-          throw new Error('No seasons found on page');
-        }
-        
-        // Find correct season
-        let foundSeasonElement = false;
-        for (let i = 0; i < seasonElements.length; i++) {
-          const seasonText = await page.evaluate(el => el.textContent.trim(), seasonElements[i]);
-          
-          if (seasonText === `S${season.toString().padStart(2, '0')}`) {
-            await seasonElements[i].click();
-            foundSeasonElement = true;
-            break;
-          }
-        }
-        
-        if (!foundSeasonElement) {
-          throw new Error(`Season ${season} not found on page`);
-        }
-        
-      } catch (seasonError) {
-        throw new Error(`Failed to select season ${season}: ${seasonError.message}`);
-      }
+      // Add this after clicking the show card:
+      console.log(`Clicked on search result: ${show.title}`);
+      
+      // After navigation completes:
+      console.log('Navigation completed, waiting for page to stabilize');
       
       // Wait a moment for the episodes to update
       await delay(2000);

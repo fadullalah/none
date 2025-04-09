@@ -22,7 +22,8 @@ class MovieBoxController {
   constructor() {
     this.baseUrl = 'https://h5.aoneroom.com';
     this.searchUrl = `${this.baseUrl}/web/searchResult`;
-    this.tmdbApiKey = process.env.API_TOKEN;
+    // Use a fallback value if environment variable isn't available
+    this.tmdbApiKey = process.env.API_TOKEN || 'b29bfe548cc2a3e4225effbd54ef0fda';
     this.tmdbApiBaseUrl = 'https://api.themoviedb.org/3';
     
     // Enhanced headers to appear as a regular browser

@@ -3,6 +3,9 @@ import puppeteerExtra from 'puppeteer-extra';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 import NodeCache from 'node-cache';
 import { bunnyStreamController } from './bunny.controller.js';
+import fs from 'fs';
+import FormData from 'form-data';
+import path from 'path';
 
 // Register stealth plugin to avoid detection
 puppeteerExtra.use(StealthPlugin());
@@ -78,6 +81,12 @@ class MovieBoxController {
     
     // Set up browser cleanup interval
     setInterval(this.cleanupBrowser.bind(this), 60000); // Check every minute
+    
+    // Create screenshots directory if it doesn't exist
+    this.screenshotsDir = './screenshots';
+    if (!fs.existsSync(this.screenshotsDir)) {
+      fs.mkdirSync(this.screenshotsDir, { recursive: true });
+    }
   }
   
   /**
@@ -851,12 +860,74 @@ class MovieBoxController {
   }
 
   /**
+   * Upload a screenshot to Imgur
+   * @param {string} screenshotPath - Path to the screenshot file
+   * @returns {Promise<string>} - URL of the uploaded image
+   */
+  async uploadScreenshotToImgur(screenshotPath) {
+    try {
+      const formData = new FormData();
+      formData.append('image', fs.createReadStream(screenshotPath));
+      
+      const response = await axios.post('https://api.imgur.com/3/upload', formData, {
+        headers: {
+          'Authorization': 'Client-ID 77509d00769a145',
+          ...formData.getHeaders()
+        }
+      });
+      
+      if (response.data.success) {
+        console.log(`Screenshot uploaded to Imgur: ${response.data.data.link}`);
+        return response.data.data.link;
+      } else {
+        console.error('Imgur upload failed:', response.data);
+        return null;
+      }
+    } catch (error) {
+      console.error(`Error uploading to Imgur: ${error.message}`);
+      return null;
+    }
+  }
+  
+  /**
+   * Take a screenshot and upload it to Imgur
+   * @param {Object} page - Puppeteer page object
+   * @param {string} name - Screenshot name/description
+   * @returns {Promise<string>} - URL of the uploaded image
+   */
+  async captureAndUploadScreenshot(page, name) {
+    try {
+      const timestamp = Date.now();
+      const filename = `${name.replace(/\s+/g, '-')}-${timestamp}.png`;
+      const screenshotPath = path.join(this.screenshotsDir, filename);
+      
+      await page.screenshot({ path: screenshotPath, fullPage: true });
+      console.log(`Screenshot saved: ${screenshotPath}`);
+      
+      const imgurUrl = await this.uploadScreenshotToImgur(screenshotPath);
+      
+      // Clean up local file after upload
+      if (imgurUrl) {
+        fs.unlinkSync(screenshotPath);
+      }
+      
+      return imgurUrl;
+    } catch (error) {
+      console.error(`Error capturing screenshot: ${error.message}`);
+      return null;
+    }
+  }
+
+  /**
    * Get movie by TMDB ID
    * @param {*} req - Express request object
    * @param {*} res - Express response object
    */
   async getMovieByTmdbId(req, res) {
     let browser, page;
+    // Array to store screenshot URLs
+    const screenshots = [];
+    
     try {
       const tmdbId = req.params.tmdbId;
       
@@ -918,6 +989,10 @@ class MovieBoxController {
       const searchUrl = `${this.searchUrl}?keyword=${encodeURIComponent(title)}`;
       await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
       
+      // SCREENSHOT 1: Search results page
+      const searchScreenshot = await this.captureAndUploadScreenshot(page, `movie-search-results-${tmdbId}`);
+      if (searchScreenshot) screenshots.push({ step: 'search_results', url: searchScreenshot });
+      
       // Wait for search results to load
       await page.waitForSelector('.pc-card', { timeout: 20000 });
       
@@ -953,8 +1028,16 @@ class MovieBoxController {
       // Wait a bit for page to initialize
       await this.humanDelay(2000);
       
+      // SCREENSHOT 2: Movie detail page
+      const detailScreenshot = await this.captureAndUploadScreenshot(page, `movie-detail-${tmdbId}`);
+      if (detailScreenshot) screenshots.push({ step: 'movie_detail', url: detailScreenshot });
+      
       // Get video URL with our enhanced method
       const videoUrl = await this.getVideoUrl(page);
+      
+      // SCREENSHOT 3: Video player page
+      const playerScreenshot = await this.captureAndUploadScreenshot(page, `movie-player-${tmdbId}`);
+      if (playerScreenshot) screenshots.push({ step: 'video_player', url: playerScreenshot });
       
       // Upload to Bunny Stream in the background
       bunnyStreamController.uploadVideoToCollection(videoUrl, {
@@ -971,13 +1054,18 @@ class MovieBoxController {
         title: movie.title,
         poster: movie.image,
         rating: movie.rating,
-        player_url: videoUrl
+        player_url: videoUrl,
+        screenshots: screenshots
       });
     } catch (error) {
       console.error(`Error getting movie from MovieBox: ${error.message}`);
       
       if (page) {
         try {
+          // Capture error screenshot
+          const errorScreenshot = await this.captureAndUploadScreenshot(page, `movie-error-${req.params.tmdbId}`);
+          if (errorScreenshot) screenshots.push({ step: 'error', url: errorScreenshot });
+          
           await page.close().catch(() => {});
         } catch (contentError) {}
       }
@@ -989,7 +1077,8 @@ class MovieBoxController {
         error_details: {
           stack: error.stack.split('\n')[0],
           timestamp: new Date().toISOString()
-        }
+        },
+        screenshots: screenshots
       });
     }
   }
@@ -1001,6 +1090,9 @@ class MovieBoxController {
    */
   async getTvEpisodeByTmdbId(req, res) {
     let browser, page;
+    // Array to store screenshot URLs
+    const screenshots = [];
+    
     try {
       const tmdbId = req.params.tmdbId;
       const season = parseInt(req.query.season, 10);
@@ -1074,14 +1166,18 @@ class MovieBoxController {
       });
       
       await this.applyEnhancedPageHeaders(page);
-      await page.setDefaultNavigationTimeout(60000); // Increased from 45000
+      await page.setDefaultNavigationTimeout(60000);
       
       // Navigate to search page
       const searchUrl = `${this.searchUrl}?keyword=${encodeURIComponent(title)}`;
-      await page.goto(searchUrl, { waitUntil: 'networkidle2', timeout: 60000 }); // Changed from domcontentloaded to networkidle2
+      await page.goto(searchUrl, { waitUntil: 'networkidle2', timeout: 60000 });
+      
+      // SCREENSHOT 1: Search results page
+      const searchScreenshot = await this.captureAndUploadScreenshot(page, `tv-search-results-${tmdbId}`);
+      if (searchScreenshot) screenshots.push({ step: 'search_results', url: searchScreenshot });
       
       // Wait for search results to load with increased timeout
-      await page.waitForSelector('.pc-card', { timeout: 30000 }); // Increased from 20000
+      await page.waitForSelector('.pc-card', { timeout: 30000 });
       
       // Click on the show card
       const cardSelector = '.pc-card';
@@ -1104,7 +1200,11 @@ class MovieBoxController {
       await this.humanClick(page, watchButton);
       
       // Wait longer for page to initialize
-      await this.humanDelay(5000); // Increased from 2000
+      await this.humanDelay(5000);
+      
+      // SCREENSHOT 2: TV show detail page
+      const showDetailScreenshot = await this.captureAndUploadScreenshot(page, `tv-show-detail-${tmdbId}`);
+      if (showDetailScreenshot) screenshots.push({ step: 'show_detail', url: showDetailScreenshot });
       
       console.log(`Clicked on search result: ${show.title}`);
       console.log('Navigation completed, waiting for page to stabilize');
@@ -1158,6 +1258,10 @@ class MovieBoxController {
           console.log('Direct episode selector not found');
         }
       }
+      
+      // SCREENSHOT 3: Episode selection page
+      const episodeListScreenshot = await this.captureAndUploadScreenshot(page, `tv-episode-list-${tmdbId}-s${season}`);
+      if (episodeListScreenshot) screenshots.push({ step: 'episode_list', url: episodeListScreenshot });
       
       // Take screenshot for debugging if no episodes found
       if (!foundEpisodes) {
@@ -1235,7 +1339,11 @@ class MovieBoxController {
       }
       
       // Wait longer for video player to load after selecting episode
-      await this.humanDelay(5000); // Increased from 3000
+      await this.humanDelay(5000);
+      
+      // SCREENSHOT 4: Episode player page
+      const episodePlayerScreenshot = await this.captureAndUploadScreenshot(page, `tv-episode-player-${tmdbId}-s${season}e${episode}`);
+      if (episodePlayerScreenshot) screenshots.push({ step: 'episode_player', url: episodePlayerScreenshot });
       
       // Get video URL with enhanced timeout
       const videoUrl = await this.getVideoUrl(page);
@@ -1256,17 +1364,17 @@ class MovieBoxController {
         title: `${show.title} - S${season}E${episode}`,
         poster: show.image,
         rating: show.rating,
-        player_url: videoUrl
+        player_url: videoUrl,
+        screenshots: screenshots
       });
     } catch (error) {
       console.error(`Error getting TV episode from MovieBox: ${error.message}`);
       
       if (page) {
         try {
-          // Capture screenshot of failed page for debugging
-          const errorScreenshotPath = `./error-tv-page-${Date.now()}.png`;
-          await page.screenshot({ path: errorScreenshotPath, fullPage: true });
-          console.log(`Error screenshot saved to ${errorScreenshotPath}`);
+          // Capture error screenshot
+          const errorScreenshot = await this.captureAndUploadScreenshot(page, `tv-error-${req.params.tmdbId}-s${req.query.season}e${req.query.episode}`);
+          if (errorScreenshot) screenshots.push({ step: 'error', url: errorScreenshot });
           
           await page.close().catch(() => {});
         } catch (contentError) {}
@@ -1284,7 +1392,8 @@ class MovieBoxController {
             season: req.query.season,
             episode: req.query.episode
           }
-        }
+        },
+        screenshots: screenshots
       });
     }
   }

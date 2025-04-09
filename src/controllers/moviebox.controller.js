@@ -741,14 +741,14 @@ class MovieBoxController {
       });
       
       await this.applyEnhancedPageHeaders(page);
-      await page.setDefaultNavigationTimeout(45000);
+      await page.setDefaultNavigationTimeout(60000); // Increased from 45000
       
       // Navigate to search page
       const searchUrl = `${this.searchUrl}?keyword=${encodeURIComponent(title)}`;
-      await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
+      await page.goto(searchUrl, { waitUntil: 'networkidle2', timeout: 60000 }); // Changed from domcontentloaded to networkidle2
       
-      // Wait for search results to load
-      await page.waitForSelector('.pc-card', { timeout: 20000 });
+      // Wait for search results to load with increased timeout
+      await page.waitForSelector('.pc-card', { timeout: 30000 }); // Increased from 20000
       
       // Click on the show card
       const cardSelector = '.pc-card';
@@ -764,62 +764,146 @@ class MovieBoxController {
         throw new Error('Watch button not found');
       }
       
-      await watchButton.click();
+      await Promise.all([
+        watchButton.click(),
+        page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 60000 })
+      ]);
       
-      // Wait for navigation to complete
-      await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 45000 });
+      // Wait longer for page to initialize
+      await delay(5000); // Increased from 2000
       
-      // Wait a bit for page to initialize
-      await delay(2000);
-      
-      // Add this after clicking the show card:
       console.log(`Clicked on search result: ${show.title}`);
-      
-      // After navigation completes:
       console.log('Navigation completed, waiting for page to stabilize');
       
-      // Wait a moment for the episodes to update
-      await delay(2000);
+      // Try multiple episode selector strategies
+      let foundEpisodes = false;
       
-      // Find and click on the episode
+      // Strategy 1: Check for the primary episode selector
       try {
-        // Wait for the episode container
-        await page.waitForSelector('.pc-ep-contain', { timeout: 15000 });
-        
-        // Check if episode elements exist
+        await page.waitForSelector('.pc-ep-contain', { timeout: 10000 });
+        foundEpisodes = true;
+        console.log('Found episodes using primary selector');
+      } catch (err) {
+        console.log('Primary episode selector not found, trying alternatives');
+      }
+      
+      // Strategy 2: Check for alternative episode selectors
+      if (!foundEpisodes) {
+        try {
+          // Try alternatives - common parent elements
+          const alternativeSelectors = [
+            '.pc-ep-box',
+            '.pc-tv-box',
+            '.pc-tv-box-inner',
+            '[data-v-d63b58d4].pc-ep-box',
+            '.flx-sta-sta'
+          ];
+          
+          for (const selector of alternativeSelectors) {
+            try {
+              await page.waitForSelector(selector, { timeout: 5000 });
+              console.log(`Found alternative selector: ${selector}`);
+              foundEpisodes = true;
+              break;
+            } catch (err) {
+              // Continue to next selector
+            }
+          }
+        } catch (err) {
+          console.log('Alternative selectors also failed');
+        }
+      }
+      
+      // Strategy 3: Just look for episode elements directly
+      if (!foundEpisodes) {
+        try {
+          await page.waitForSelector('.pc-ep', { timeout: 10000 });
+          foundEpisodes = true;
+          console.log('Found episodes using direct element selector');
+        } catch (err) {
+          console.log('Direct episode selector not found');
+        }
+      }
+      
+      // Take screenshot for debugging if no episodes found
+      if (!foundEpisodes) {
+        const screenshotPath = `./debug-tv-page-${Date.now()}.png`;
+        await page.screenshot({ path: screenshotPath, fullPage: true });
+        console.log(`Page screenshot saved to ${screenshotPath}`);
+        throw new Error('No episode selectors found on page');
+      }
+      
+      // Use a more reliable approach to select the episode
+      try {
+        // Get all episode elements
         const episodeElements = await page.$$('.pc-ep');
         
         if (episodeElements.length === 0) {
-          throw new Error('No episodes found on page');
-        }
-        
-        // Find correct episode
-        let foundEpisodeElement = false;
-        for (let i = 0; i < episodeElements.length; i++) {
-          const episodeText = await page.evaluate(el => {
-            const span = el.querySelector('span');
-            return span ? span.textContent.trim() : '';
-          }, episodeElements[i]);
+          // Try direct DOM evaluation as a fallback
+          const episodeFound = await page.evaluate((targetEpisode) => {
+            // Look for any elements that might contain episode numbers
+            const possibleEpisodeElements = Array.from(document.querySelectorAll('*'))
+              .filter(el => {
+                const text = el.textContent.trim();
+                return text === targetEpisode.toString().padStart(2, '0') || 
+                       text === targetEpisode.toString();
+              });
+            
+            if (possibleEpisodeElements.length > 0) {
+              // Click the first matching element
+              possibleEpisodeElements[0].click();
+              return true;
+            }
+            return false;
+          }, episode);
           
-          if (episodeText === episode.toString().padStart(2, '0')) {
-            await episodeElements[i].click();
-            foundEpisodeElement = true;
-            break;
+          if (!episodeFound) {
+            throw new Error(`No episode elements found for episode ${episode}`);
+          }
+        } else {
+          console.log(`Found ${episodeElements.length} episode elements`);
+          
+          // Check for episode by attribute or text content
+          let found = false;
+          for (let i = 0; i < episodeElements.length; i++) {
+            const episodeText = await page.evaluate(el => {
+              const span = el.querySelector('span');
+              return span ? span.textContent.trim() : '';
+            }, episodeElements[i]);
+            
+            // Match either padded (01) or unpadded (1) format
+            if (episodeText === episode.toString().padStart(2, '0') || 
+                episodeText === episode.toString()) {
+              await episodeElements[i].click();
+              found = true;
+              console.log(`Clicked on episode ${episodeText}`);
+              break;
+            }
+          }
+          
+          // If specific episode not found, try just clicking on first episode
+          if (!found && episodeElements.length > 0) {
+            if (episode <= episodeElements.length) {
+              await episodeElements[episode-1].click();
+              console.log(`Clicked on episode at index ${episode-1}`);
+              found = true;
+            } else {
+              throw new Error(`Episode ${episode} is greater than available episodes (${episodeElements.length})`);
+            }
+          }
+          
+          if (!found) {
+            throw new Error(`Could not find element for episode ${episode}`);
           }
         }
-        
-        if (!foundEpisodeElement) {
-          throw new Error(`Episode ${episode} not found on page`);
-        }
-        
       } catch (episodeError) {
         throw new Error(`Failed to select episode ${episode}: ${episodeError.message}`);
       }
       
-      // Wait for video player to load after selecting episode
-      await delay(3000);
+      // Wait longer for video player to load after selecting episode
+      await delay(5000); // Increased from 3000
       
-      // Get video URL
+      // Get video URL with enhanced timeout
       const videoUrl = await this.getVideoUrl(page);
       
       // Upload to Bunny Stream in the background
@@ -845,6 +929,11 @@ class MovieBoxController {
       
       if (page) {
         try {
+          // Capture screenshot of failed page for debugging
+          const errorScreenshotPath = `./error-tv-page-${Date.now()}.png`;
+          await page.screenshot({ path: errorScreenshotPath, fullPage: true });
+          console.log(`Error screenshot saved to ${errorScreenshotPath}`);
+          
           await page.close().catch(() => {});
         } catch (contentError) {}
       }

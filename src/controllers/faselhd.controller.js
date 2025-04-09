@@ -3,6 +3,7 @@ import { JSDOM } from 'jsdom';
 import NodeCache from 'node-cache';
 import puppeteerExtra from 'puppeteer-extra';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
+import { screenshotUtility } from '../utils/screenshot.utility.js';
 
 // Register the stealth plugin
 puppeteerExtra.use(StealthPlugin());
@@ -470,11 +471,26 @@ class FaselHDController {
   }
 
   /**
-   * Get movie from FaselHD by TMDB ID
+   * Take a screenshot and upload it
+   * @param {Object} page - Puppeteer page object
+   * @param {string} name - Screenshot name/description
+   * @returns {Promise<string|null>} - URL of the uploaded image
+   */
+  async captureScreenshot(page, name) {
+    const screenshot = await screenshotUtility.captureScreenshot(page, name, true);
+    return screenshot?.url || null;
+  }
+
+  /**
+   * Get movie from FaselHD by TMDB ID with screenshots
    * @param {Object} req - Request object
    * @param {Object} res - Response object
    */
   async getMovieByTmdbId(req, res) {
+    let browser = null;
+    let page = null;
+    const screenshots = [];
+    
     try {
       const { tmdbId } = req.params;
       
@@ -532,16 +548,45 @@ class FaselHDController {
       // Use our direct video extraction method
       const videoUrl = await this.extractVideoFromPlayer(playerUrl);
       
+      // Add screenshot capture at key points
+      browser = await puppeteerExtra.launch({
+        headless: 'new',
+        args: [
+          '--no-sandbox',
+          '--disable-setuid-sandbox',
+          '--disable-web-security',
+          '--window-size=1366,768'
+        ]
+      });
+      
+      page = await browser.newPage();
+      await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36');
+      
+      // Search page screenshot
+      await page.goto(`${this.baseUrl}/?s=${encodeURIComponent(tmdbData.title)}`, { waitUntil: 'domcontentloaded' });
+      const searchScreenshotUrl = await this.captureScreenshot(page, `faselhd-search-${tmdbId}`);
+      if (searchScreenshotUrl) screenshots.push({ step: 'search_results', url: searchScreenshotUrl });
+      
+      // Movie page screenshot
+      if (bestMatch?.url) {
+        await page.goto(bestMatch.url, { waitUntil: 'domcontentloaded' });
+        const detailScreenshotUrl = await this.captureScreenshot(page, `faselhd-movie-${tmdbId}`);
+        if (detailScreenshotUrl) screenshots.push({ step: 'movie_details', url: detailScreenshotUrl });
+      }
+      
       const result = {
         title: tmdbData.title,
         tmdbId,
         faselhdUrl: bestMatch.url,
         playerUrl,
-        videoUrl
+        videoUrl,
+        screenshots
       };
       
       // Save to cache
       faselhdCache.set(cacheKey, result);
+      
+      if (browser) await browser.close();
       
       return res.json({
         success: true,
@@ -550,10 +595,20 @@ class FaselHDController {
       });
     } catch (error) {
       console.error(`FaselHD movie error: ${error.message}`);
+      
+      // Capture error screenshot if page exists
+      if (page) {
+        const errorScreenshotUrl = await this.captureScreenshot(page, `faselhd-error-${req.params.tmdbId}`);
+        if (errorScreenshotUrl) screenshots.push({ step: 'error', url: errorScreenshotUrl });
+      }
+      
+      if (browser) await browser.close();
+      
       return res.status(500).json({
         success: false,
         message: 'Failed to get movie from FaselHD',
-        error: error.message
+        error: error.message,
+        screenshots: screenshots
       });
     }
   }

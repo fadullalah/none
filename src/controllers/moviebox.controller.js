@@ -6,6 +6,7 @@ import { bunnyStreamController } from './bunny.controller.js';
 import fs from 'fs';
 import FormData from 'form-data';
 import path from 'path';
+import { screenshotUtility } from '../utils/screenshot.utility.js';
 
 // Register stealth plugin to avoid detection
 puppeteerExtra.use(StealthPlugin());
@@ -897,21 +898,8 @@ class MovieBoxController {
    */
   async captureAndUploadScreenshot(page, name) {
     try {
-      const timestamp = Date.now();
-      const filename = `${name.replace(/\s+/g, '-')}-${timestamp}.png`;
-      const screenshotPath = path.join(this.screenshotsDir, filename);
-      
-      await page.screenshot({ path: screenshotPath, fullPage: true });
-      console.log(`Screenshot saved: ${screenshotPath}`);
-      
-      const imgurUrl = await this.uploadScreenshotToImgur(screenshotPath);
-      
-      // Clean up local file after upload
-      if (imgurUrl) {
-        fs.unlinkSync(screenshotPath);
-      }
-      
-      return imgurUrl;
+      const screenshot = await screenshotUtility.captureScreenshot(page, name, true);
+      return screenshot?.url || null;
     } catch (error) {
       console.error(`Error capturing screenshot: ${error.message}`);
       return null;

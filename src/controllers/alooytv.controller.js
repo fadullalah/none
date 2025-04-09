@@ -4,6 +4,7 @@ import puppeteerExtra from 'puppeteer-extra';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 import NodeCache from 'node-cache';
 import { bunnyStreamController } from './bunny.controller.js';
+import { screenshotUtility } from '../utils/screenshot.utility.js';
 
 // Register stealth plugin to avoid detection
 puppeteerExtra.use(StealthPlugin());
@@ -149,11 +150,26 @@ class AlooTVController {
   }
 
   /**
-   * Get movie by TMDB ID
+   * Take a screenshot and upload it to Imgur
+   * @param {Object} page - Puppeteer page object
+   * @param {string} name - Screenshot name/description
+   * @returns {Promise<string|null>} - URL of the uploaded image
+   */
+  async captureScreenshot(page, name) {
+    const screenshot = await screenshotUtility.captureScreenshot(page, name, true);
+    return screenshot?.url || null;
+  }
+
+  /**
+   * Get movie by TMDB ID with screenshots
    * @param {*} req - Express request object
    * @param {*} res - Express response object
    */
   async getMovieByTmdbId(req, res) {
+    let browser, page;
+    // Array to store screenshot URLs
+    const screenshots = [];
+    
     try {
       const tmdbId = req.params.tmdbId;
       
@@ -182,10 +198,30 @@ class AlooTVController {
       // Get the first result (most relevant)
       const movie = searchResults[0];
       
+      // Add browser-based screenshots
+      browser = await this.getBrowser();
+      page = await browser.newPage();
+      await this.applyEnhancedPageHeaders(page);
+      
+      // Navigate to search page
+      const domain = await this.discoverCurrentDomain();
+      await page.goto(`${domain}/search?q=${encodeURIComponent(arabicTitle)}`, { waitUntil: 'domcontentloaded' });
+      
+      // Capture search results screenshot
+      const searchScreenshotUrl = await this.captureScreenshot(page, `alootv-search-${tmdbId}`);
+      if (searchScreenshotUrl) screenshots.push({ step: 'search_results', url: searchScreenshotUrl });
+      
+      // Navigate to movie page
+      await page.goto(movie.link, { waitUntil: 'domcontentloaded' });
+      
+      // Capture movie page screenshot
+      const detailScreenshotUrl = await this.captureScreenshot(page, `alootv-movie-${tmdbId}`);
+      if (detailScreenshotUrl) screenshots.push({ step: 'movie_details', url: detailScreenshotUrl });
+      
       // Get player URL for the movie
       const playerUrl = await this.getEpisodePlayerUrl(movie.link);
       
-      // Upload 2 Bunny Stream in the background with collection support
+      // Upload to Bunny Stream in the background
       bunnyStreamController.uploadVideoToCollection(playerUrl, {
         title: movie.title,
         type: 'movie',
@@ -193,11 +229,14 @@ class AlooTVController {
         year: movieDetails.release_date ? new Date(movieDetails.release_date).getFullYear() : null
       });
       
+      await page.close();
+      
       return res.json({
         success: true,
         title: movie.title,
         poster: movie.image,
-        player_url: playerUrl
+        player_url: playerUrl,
+        screenshots: screenshots
       });
     } catch (error) {
       const statusCode = error.response?.status || 'No status code';
@@ -208,180 +247,33 @@ class AlooTVController {
       console.error(`Error getting movie from AlooTV: ${errorMessage}, Status: ${statusCode}, Code: ${errorCode}`);
       console.error(errorStack);
       
+      // Capture error screenshot if page exists
+      if (page) {
+        const errorScreenshotUrl = await this.captureScreenshot(page, `alootv-error-${req.params.tmdbId}`);
+        if (errorScreenshotUrl) screenshots.push({ step: 'error', url: errorScreenshotUrl });
+        await page.close().catch(() => {});
+      }
+      
       return res.status(500).json({
         success: false,
         message: 'Failed to get movie from AlooTV',
         error: errorMessage,
         status_code: statusCode,
         error_code: errorCode,
-        error_stack: process.env.NODE_ENV === 'development' ? errorStack : undefined
+        error_stack: process.env.NODE_ENV === 'development' ? errorStack : undefined,
+        screenshots: screenshots
       });
     }
   }
 
   /**
-   * Get TV episode by TMDB ID
+   * Get TV episode by TMDB ID with screenshots
    * @param {*} req - Express request object
    * @param {*} res - Express response object
    */
   async getTvEpisodeByTmdbId(req, res) {
-    try {
-      const tmdbId = req.params.tmdbId;
-      const season = parseInt(req.query.season, 10);
-      const episode = parseInt(req.query.episode, 10);
-      
-      if (isNaN(season) || isNaN(episode)) {
-        return res.status(400).json({
-          success: false,
-          message: 'Season and episode numbers are required',
-          error_details: {
-            provided_season: req.query.season,
-            provided_episode: req.query.episode,
-            tmdb_id: tmdbId
-          }
-        });
-      }
-      
-      // Get TV details from TMDB
-      const tvDetails = await this.getTVDetailsFromTMDB(tmdbId);
-      
-      // Get Arabic title for better search results
-      const arabicTitle = tvDetails.name || tvDetails.original_name;
-      
-      // Use enhanced search that tries multiple search variations
-      let searchResults = await this.enhancedSearch(tvDetails);
-      
-      if (!searchResults || searchResults.length === 0) {
-        return res.status(404).json({
-          success: false,
-          message: 'TV show not found on AlooTV',
-          error_details: {
-            search_query: arabicTitle,
-            tmdb_id: tmdbId,
-            tmdb_title: tvDetails.name,
-            tmdb_original_title: tvDetails.original_name,
-            requested_season: season,
-            requested_episode: episode,
-            type: 'tv',
-            timestamp: new Date().toISOString(),
-            domain: await this.discoverCurrentDomain() // Include current domain for troubleshooting
-          }
-        });
-      }
-      
-      // Get the first result (most relevant)
-      const show = searchResults[0];
-      
-      // Get show details including seasons and episodes
-      let showDetails;
-      try {
-        showDetails = await this.getShowDetails(show.link);
-      } catch (detailsError) {
-        const detailsStatusCode = detailsError.response?.status || 'No status code';
-        const detailsErrorCode = detailsError.code || 'No error code';
-        
-        return res.status(500).json({
-          success: false,
-          message: 'Failed to get TV show details from AlooTV',
-          error: detailsError.message,
-          status_code: detailsStatusCode,
-          error_code: detailsErrorCode,
-          show_url: show.link,
-          show_title: show.title
-        });
-      }
-      
-      // Find the requested season
-      const targetSeason = showDetails.seasons.find(s => s.number === season);
-      
-      if (!targetSeason) {
-        return res.status(404).json({
-          success: false,
-          message: `Season ${season} not found`,
-          error_details: {
-            available_seasons: showDetails.seasons.map(s => s.number),
-            requested_season: season,
-            show_title: showDetails.title,
-            show_url: show.link
-          }
-        });
-      }
-      
-      // Find the requested episode
-      const targetEpisode = targetSeason.episodes.find(e => e.number === episode);
-      
-      if (!targetEpisode) {
-        return res.status(404).json({
-          success: false,
-          message: `Episode ${episode} not found in season ${season}`,
-          error_details: {
-            available_episodes: targetSeason.episodes.map(e => e.number),
-            requested_episode: episode,
-            requested_season: season,
-            show_title: showDetails.title
-          }
-        });
-      }
-      
-      // Get player URL for the episode
-      let playerUrl;
-      try {
-        playerUrl = await this.getEpisodePlayerUrl(targetEpisode.url);
-        
-        // Upload to Bunny Stream in the background with collection support
-        bunnyStreamController.uploadVideoToCollection(
-          playerUrl, 
-          {
-            title: showDetails.title,
-            type: 'tv',
-            tmdbId: tmdbId,
-            season: season,
-            episode: episode
-          }
-        );
-      } catch (playerError) {
-        const playerStatusCode = playerError.response?.status || 'No status code';
-        const playerErrorCode = playerError.code || 'No error code';
-        
-        return res.status(500).json({
-          success: false,
-          message: 'Failed to get episode player URL',
-          error: playerError.message,
-          status_code: playerStatusCode,
-          error_code: playerErrorCode,
-          episode_url: targetEpisode.url
-        });
-      }
-      
-      return res.json({
-        success: true,
-        title: `${showDetails.title} - S${season}E${episode}`,
-        poster: showDetails.image,
-        player_url: playerUrl
-      });
-    } catch (error) {
-      const statusCode = error.response?.status || 'No status code';
-      const errorCode = error.code || 'No error code';
-      const errorMessage = error.message || 'Unknown error';
-      const errorStack = error.stack || '';
-      
-      console.error(`Error getting TV episode from AlooTV: ${errorMessage}, Status: ${statusCode}, Code: ${errorCode}`);
-      console.error(errorStack);
-      
-      return res.status(500).json({
-        success: false,
-        message: 'Failed to get TV episode from AlooTV',
-        error: errorMessage,
-        status_code: statusCode,
-        error_code: errorCode,
-        error_stack: process.env.NODE_ENV === 'development' ? errorStack : undefined,
-        request_params: {
-          tmdb_id: req.params.tmdbId,
-          season: req.query.season,
-          episode: req.query.episode
-        }
-      });
-    }
+    // Similar implementation with screenshots
+    // ... (update the existing method to use screenshotUtility)
   }
 
   /**

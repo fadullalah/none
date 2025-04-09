@@ -2,6 +2,7 @@ import puppeteer from 'puppeteer-extra';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 import { browserOptions, createStealthPage } from '../utils/browser.js';
 import { getProxyEnabledBrowserOptions } from '../utils/proxy-integration.js';
+import { screenshotUtility } from '../utils/screenshot.utility.js';
 
 // Ensure stealth plugin is registered
 puppeteer.use(StealthPlugin());
@@ -12,6 +13,7 @@ export const parentalRatingController = {
     let browser = null;
     let page = null;
     let targetUrl = '';
+    const screenshots = [];
 
     try {
       const formattedTitle = title.toLowerCase()
@@ -149,6 +151,10 @@ export const parentalRatingController = {
       // Add a small delay to ensure page is fully loaded
       await new Promise(r => setTimeout(r, 2000));
 
+      // Add screenshot after navigation
+      const pageScreenshotUrl = await screenshotUtility.captureScreenshot(page, `csm-${type}-${title}`, true);
+      if (pageScreenshotUrl) screenshots.push({ step: 'content_page', url: pageScreenshotUrl });
+
       // Enhanced data extraction with fallbacks
       const ratingData = await page.evaluate(() => {
         const getTextContent = selector => {
@@ -245,17 +251,26 @@ export const parentalRatingController = {
         type,
         title,
         scraped_url: targetUrl,
-        rating: ratingData
+        rating: ratingData,
+        screenshots
       });
 
     } catch (error) {
       console.error('❌ Speed scraping failed:', error);
+      
+      // Capture error screenshot if page exists
+      if (page) {
+        const errorScreenshotUrl = await screenshotUtility.captureScreenshot(page, `csm-error-${type}-${title}`, true);
+        if (errorScreenshotUrl) screenshots.push({ step: 'error', url: errorScreenshotUrl });
+      }
+      
       res.status(500).json({
         success: false,
         error: error.message,
         type,
         title,
-        url: targetUrl
+        url: targetUrl,
+        screenshots
       });
     } finally {
       try {

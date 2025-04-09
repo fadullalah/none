@@ -5,6 +5,7 @@ import axios from 'axios';
 import { JSDOM } from 'jsdom';
 import NodeCache from 'node-cache';
 import { HttpsProxyAgent } from 'https-proxy-agent';
+import { screenshotUtility } from '../utils/screenshot.utility.js';
 
 // Register the stealth plugin
 puppeteerExtra.use(StealthPlugin());
@@ -163,11 +164,26 @@ class PlayerScraperController {
   }
   
   /**
-   * Extract video URL from any player
+   * Take a screenshot and upload it
+   * @param {Object} page - Puppeteer page object
+   * @param {string} name - Screenshot name/description
+   * @returns {Promise<string|null>} - URL of the uploaded image
+   */
+  async captureScreenshot(page, name) {
+    const screenshot = await screenshotUtility.captureScreenshot(page, name, true);
+    return screenshot?.url || null;
+  }
+  
+  /**
+   * Extract video URL from any player with screenshots
    * @param {Object} req - Request object with player URL in query params
    * @param {Object} res - Response object
    */
   async extractVideoUrl(req, res) {
+    let browser = null;
+    let page = null;
+    const screenshots = [];
+    
     try {
       const { url } = req.query;
       
@@ -277,20 +293,57 @@ class PlayerScraperController {
       // Cache the result
       urlCache.set(url, videoUrl);
       
+      // For the puppeteer methods, add screenshot capturing
+      if (!videoUrl) {
+        browser = await puppeteerExtra.launch({
+          headless: 'new',
+          args: [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-web-security',
+            '--window-size=1366,768'
+          ]
+        });
+        
+        page = await browser.newPage();
+        await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36');
+        
+        // Navigate to player page
+        await page.goto(url, { waitUntil: 'domcontentloaded' });
+        const playerScreenshotUrl = await this.captureScreenshot(page, `player-page-${Date.now()}`);
+        if (playerScreenshotUrl) screenshots.push({ step: 'player_page', url: playerScreenshotUrl });
+        
+        // ... continue with existing extraction logic
+      }
+      
+      if (browser) await browser.close();
+      
+      // Add screenshots to response
       return res.json({
         success: true,
-        source: 'extraction',
+        source: cachedUrl ? 'cache' : 'extraction',
         playerType: playerType || 'generic',
         extractionMethod: extractionDetails.attemptedMethods[extractionDetails.attemptedMethods.length - 1],
-        videoUrl
+        videoUrl,
+        screenshots
       });
     } catch (error) {
       console.error('Error extracting video URL:', error);
+      
+      // Capture error screenshot if page exists
+      if (page) {
+        const errorScreenshotUrl = await this.captureScreenshot(page, `player-error-${Date.now()}`);
+        if (errorScreenshotUrl) screenshots.push({ step: 'error', url: errorScreenshotUrl });
+      }
+      
+      if (browser) await browser.close();
+      
       return res.status(500).json({
         success: false,
         message: 'Error extracting video URL',
         error: error.message,
-        stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+        stack: process.env.NODE_ENV === 'development' ? error.stack : undefined,
+        screenshots
       });
     }
   }

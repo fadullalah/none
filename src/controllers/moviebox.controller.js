@@ -29,7 +29,7 @@ class MovieBoxController {
     this.headers = {
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
       'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-      'Accept-Language': 'en-US,en;q=0.9,ar;q=0.8',
+      'Accept-Language': 'en-US,en;q=0.9',
       'Accept-Encoding': 'gzip, deflate, br',
       'Referer': 'https://www.google.com/',
       'Origin': 'https://www.google.com',
@@ -42,35 +42,97 @@ class MovieBoxController {
       'Sec-Fetch-User': '?1',
       'Upgrade-Insecure-Requests': '1',
       'Cache-Control': 'max-age=0',
-      'Connection': 'keep-alive'
+      'Connection': 'keep-alive',
+      'DNT': Math.random() > 0.5 ? '1' : null, // Randomly set Do Not Track
     };
     
-    // Set up browser cleanup interval
-    setInterval(this.cleanupBrowser.bind(this), 60000); // Check every minute
-    
-    // Setup header rotation interval
-    setInterval(this.rotateUserAgent.bind(this), 600000); // Rotate user agent every 10 minutes
-  }
-  
-  /**
-   * Rotate user agent to avoid detection patterns
-   */
-  rotateUserAgent() {
-    const userAgents = [
+    // More realistic user agents with browser versions that match the current date
+    this.userAgents = [
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
       'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15',
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36 Edg/123.0.0.0',
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/123.0',
-      'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36'
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:124.0) Gecko/20100101 Firefox/124.0',
+      'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36 OPR/109.0.0.0',
+      'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
+      'Mozilla/5.0 (iPad; CPU OS 17_4_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
     ];
     
+    // Common screen resolutions for better variance
+    this.screenResolutions = [
+      { width: 1366, height: 768 },  // Most common laptop
+      { width: 1920, height: 1080 }, // Full HD
+      { width: 1536, height: 864 },  // Common laptop
+      { width: 1440, height: 900 },  // MacBook
+      { width: 1680, height: 1050 }, // Larger laptop
+      { width: 1280, height: 720 },  // HD
+    ];
+    
+    // Set up random IP rotation interval (more realistic than UA rotation)
+    setInterval(this.rotateUserIdentity.bind(this), 
+      Math.floor(Math.random() * 600000) + 300000); // 5-15 minutes
+    
+    // Cookie storage to simulate real browser persistence
+    this.cookieJar = {};
+    
+    // Set up browser cleanup interval
+    setInterval(this.cleanupBrowser.bind(this), 60000); // Check every minute
+  }
+  
+  /**
+   * Generate a random delay to simulate human timing
+   * @param {number} min - Minimum delay in ms
+   * @param {number} max - Maximum delay in ms
+   * @returns {Promise<void>}
+   */
+  async humanDelay(min = 500, max = 3000) {
+    const randomDelay = Math.floor(Math.random() * (max - min + 1)) + min;
+    await delay(randomDelay);
+  }
+  
+  /**
+   * Rotate user identity parameters (more comprehensive than just user-agent)
+   */
+  rotateUserIdentity() {
     // Select a random user agent
-    const randomAgent = userAgents[Math.floor(Math.random() * userAgents.length)];
+    const randomAgent = this.userAgents[Math.floor(Math.random() * this.userAgents.length)];
     this.headers['User-Agent'] = randomAgent;
+    
+    // Randomize accept-language with proper format and weights
+    const languages = ['en-US', 'en', 'fr', 'de', 'es', 'it'];
+    const primaryLang = languages[Math.floor(Math.random() * 2)]; // Favor English
+    const secondaryLang = languages[Math.floor(Math.random() * languages.length)];
+    this.headers['Accept-Language'] = `${primaryLang},${secondaryLang};q=${(Math.random() * 0.4 + 0.5).toFixed(1)}`;
+    
+    // Random DNT (Do Not Track) setting
+    if (Math.random() > 0.7) {
+      this.headers['DNT'] = '1';
+    } else {
+      delete this.headers['DNT'];
+    }
+    
+    // Update browser-specific headers based on the user agent
+    if (randomAgent.includes('Firefox')) {
+      this.headers['Sec-Ch-Ua'] = null;
+      this.headers['Sec-Ch-Ua-Mobile'] = null;
+      this.headers['Sec-Ch-Ua-Platform'] = null;
+    } else if (randomAgent.includes('Chrome')) {
+      const chromeVersion = randomAgent.match(/Chrome\/(\d+)/)[1];
+      this.headers['Sec-Ch-Ua'] = `"Google Chrome";v="${chromeVersion}", "Not:A-Brand";v="8", "Chromium";v="${chromeVersion}"`;
+      this.headers['Sec-Ch-Ua-Platform'] = randomAgent.includes('Windows') ? '"Windows"' : 
+                                         randomAgent.includes('Mac') ? '"macOS"' : 
+                                         randomAgent.includes('Linux') ? '"Linux"' : 
+                                         randomAgent.includes('iPhone') || randomAgent.includes('iPad') ? '"iOS"' : '"Unknown"';
+    }
+    
+    // Mobile detection
+    this.headers['Sec-Ch-Ua-Mobile'] = randomAgent.includes('Mobile') || 
+                                     randomAgent.includes('iPhone') || 
+                                     randomAgent.includes('iPad') ? '?1' : '?0';
   }
 
   /**
-   * Get or create a browser instance
+   * Get or create a browser instance with more realistic settings
    * @returns {Promise<Browser>} Puppeteer browser instance
    */
   async getBrowser() {
@@ -83,12 +145,14 @@ class MovieBoxController {
           browserInstance = null;
         }
         
+        // Choose a random viewport size for better fingerprint variance
+        const viewport = this.screenResolutions[
+          Math.floor(Math.random() * this.screenResolutions.length)
+        ];
+        
         browserInstance = await puppeteerExtra.launch({
           headless: "new",  // Use new headless mode
-          defaultViewport: {
-            width: 1366,
-            height: 768
-          },
+          defaultViewport: viewport,
           args: [
             '--no-sandbox',
             '--disable-setuid-sandbox',
@@ -97,13 +161,25 @@ class MovieBoxController {
             '--disable-dev-shm-usage',
             '--js-flags=--expose-gc',
             '--disable-gpu',
-            '--window-size=1366,768',
+            `--window-size=${viewport.width},${viewport.height}`,
             '--disable-notifications',
             '--disable-infobars',
-            '--disable-dev-shm-usage',  // Add to avoid crash in containerized environments
-            '--no-zygote'  // Add to improve stability
+            '--disable-dev-shm-usage',
+            '--no-zygote',
+            '--disable-accelerated-2d-canvas',  // Reduce fingerprinting
+            '--hide-scrollbars',                // Common in normal browsers
+            '--disable-background-networking',  // Prevent suspicious background activity
+            '--no-default-browser-check',       // Look more like regular browser
+            '--disable-extensions',             // Fewer fingerprinting signals
+            '--disable-domain-reliability',     // Avoid extra network activity
+            `--user-agent=${this.headers['User-Agent']}` // Match UA from headers
           ],
-          ignoreDefaultArgs: ['--enable-automation'] // Hide automation
+          ignoreDefaultArgs: [
+            '--enable-automation',
+            '--disable-extensions',
+          ],
+          // Add preferences that real users would typically have
+          userDataDir: null // Using a null directory prevents profile saving
         });
       }
       
@@ -345,8 +421,10 @@ class MovieBoxController {
         }
       });
       
-      // Wait for the player and download button to initialize
-      await delay(3000);
+      // Act more human-like before clicking buttons
+      await this.simulateHumanScrolling(page);
+      await this.humanDelay(1500, 3500);
+      await this.simulateHumanMouseMovement(page);
       
       // First try: Look for the download button and click it
       console.log('Looking for download button...');
@@ -358,11 +436,23 @@ class MovieBoxController {
         return this.fallbackGetVideoUrl(page, videoUrls);
       }
       
+      // Move mouse to the button before clicking (more human-like)
+      const buttonBox = await downloadButton.boundingBox();
+      if (buttonBox) {
+        // Move to a random position within the button
+        const x = buttonBox.x + buttonBox.width * (0.3 + Math.random() * 0.4);
+        const y = buttonBox.y + buttonBox.height * (0.3 + Math.random() * 0.4);
+        await page.mouse.move(x, y, { steps: 5 });
+        await this.humanDelay(300, 800);
+      }
+      
       console.log('Download button found, clicking...');
-      await downloadButton.click();
+      await downloadButton.click({ delay: Math.floor(Math.random() * 100) + 50 });
+      
+      // Human-like delay before next action
+      await this.humanDelay(800, 1500);
       
       // Wait for the quality selection modal to appear
-      await delay(1000);
       await page.waitForSelector('.pc-quality-list', { timeout: 5000 });
       
       // Find all quality options
@@ -411,6 +501,15 @@ class MovieBoxController {
       
       console.log(`Selected highest quality: ${highestQuality.resolution}`);
       
+      // Move mouse to the quality option before clicking (human-like)
+      const qualityBox = await highestQuality.element.boundingBox();
+      if (qualityBox) {
+        const x = qualityBox.x + qualityBox.width * (0.3 + Math.random() * 0.4);
+        const y = qualityBox.y + qualityBox.height * (0.3 + Math.random() * 0.4);
+        await page.mouse.move(x, y, { steps: 3 });
+        await this.humanDelay(200, 500);
+      }
+      
       // Create a promise to capture the download URL
       const downloadUrlPromise = new Promise((resolve) => {
         page.on('request', request => {
@@ -421,8 +520,8 @@ class MovieBoxController {
         });
       });
       
-      // Click on the highest quality option
-      await highestQuality.element.click();
+      // Click on the highest quality option with a human-like delay
+      await highestQuality.element.click({ delay: Math.floor(Math.random() * 50) + 30 });
       
       // Wait for the download to start and capture the URL (with timeout)
       const downloadUrl = await Promise.race([
@@ -435,6 +534,13 @@ class MovieBoxController {
       
       if (downloadUrl) {
         console.log('Successfully captured download URL:', downloadUrl);
+        
+        // Sometimes humans cancel downloads - simulate by not actually downloading
+        // but we've already captured the URL so we're good
+        if (Math.random() > 0.8) {
+          await page.keyboard.press('Escape');
+        }
+        
         return downloadUrl;
       }
       
@@ -457,6 +563,10 @@ class MovieBoxController {
   async fallbackGetVideoUrl(page, capturedVideoUrls = []) {
     try {
       console.log('Using fallback method to get video URL');
+      
+      // Add human-like behaviors before checking for video
+      await this.simulateHumanScrolling(page);
+      await this.simulateHumanMouseMovement(page);
       
       // First try: Check specifically for .art-video element
       let videoUrl = await page.evaluate(() => {
@@ -492,7 +602,8 @@ class MovieBoxController {
         }
       });
       
-      await delay(2000);
+      // Human-like delay after clicking
+      await this.humanDelay(1000, 2500);
       
       // Check again for the art-video element after clicking
       videoUrl = await page.evaluate(() => {
@@ -546,6 +657,196 @@ class MovieBoxController {
       console.error(`Error in fallback video URL extraction: ${error.message}`);
       throw error;
     }
+  }
+
+  /**
+   * Simulate human-like mouse movement on the page
+   * @param {Object} page - Puppeteer page
+   */
+  async simulateHumanMouseMovement(page) {
+    try {
+      const viewportSize = await page.viewport();
+      
+      // Create 3-5 random points for mouse to move through
+      const points = [];
+      const numPoints = Math.floor(Math.random() * 3) + 3;
+      
+      for (let i = 0; i < numPoints; i++) {
+        points.push({
+          x: Math.floor(Math.random() * viewportSize.width),
+          y: Math.floor(Math.random() * viewportSize.height)
+        });
+      }
+      
+      // Move mouse through random points with human-like timing
+      for (const point of points) {
+        await page.mouse.move(point.x, point.y, { steps: Math.floor(Math.random() * 5) + 3 });
+        await this.humanDelay(100, 800);
+      }
+    } catch (error) {
+      // Silently handle errors - mouse movement is non-critical
+    }
+  }
+  
+  /**
+   * Simulate human-like scrolling behavior
+   * @param {Object} page - Puppeteer page
+   */
+  async simulateHumanScrolling(page) {
+    try {
+      // Get page height
+      const bodyHeight = await page.evaluate(() => document.body.scrollHeight);
+      
+      // Determine number of scroll actions (random)
+      const scrollCount = Math.floor(Math.random() * 3) + 2;
+      const scrollDistance = Math.floor(bodyHeight / scrollCount);
+      
+      let currentPosition = 0;
+      
+      // Perform scrolling with random pauses
+      for (let i = 0; i < scrollCount; i++) {
+        // Random scroll distance within reasonable range
+        const scrollPixels = scrollDistance + Math.floor(Math.random() * 100) - 50;
+        currentPosition += scrollPixels;
+        
+        // Execute scroll with smooth behavior
+        await page.evaluate((scrollPos) => {
+          window.scrollTo({
+            top: scrollPos,
+            behavior: 'smooth'
+          });
+        }, currentPosition);
+        
+        // Random pause between scrolls like a human would do
+        await this.humanDelay(500, 2000);
+      }
+    } catch (error) {
+      // Silently handle errors - scrolling is non-critical
+    }
+  }
+
+  /**
+   * Apply enhanced page configuration for better human simulation
+   * @param {Object} page - Puppeteer page
+   */
+  async applyEnhancedPageHeaders(page) {
+    // Set user agent and headers
+    await page.setUserAgent(this.headers['User-Agent']);
+    
+    // Filter out null headers
+    const cleanedHeaders = {};
+    for (const [key, value] of Object.entries(this.headers)) {
+      if (value !== null) {
+        cleanedHeaders[key] = value;
+      }
+    }
+    
+    await page.setExtraHTTPHeaders(cleanedHeaders);
+    
+    // Set viewport to match the user agent
+    const isMobile = this.headers['Sec-Ch-Ua-Mobile'] === '?1';
+    const viewportIndex = isMobile ? 
+      Math.floor(Math.random() * 2) : // Mobile viewport (smaller options)
+      Math.floor(Math.random() * (this.screenResolutions.length - 2)) + 2; // Desktop viewport
+    
+    const viewport = this.screenResolutions[viewportIndex];
+    await page.setViewport({
+      width: viewport.width,
+      height: viewport.height,
+      deviceScaleFactor: Math.random() > 0.5 ? 2 : 1, // Randomize between retina and non-retina
+      isMobile: isMobile,
+      hasTouch: isMobile,
+    });
+    
+    // Set realistic browser behavior
+    await page.evaluateOnNewDocument(() => {
+      // Override referrer
+      Object.defineProperty(document, 'referrer', { get: () => 'https://www.google.com/' });
+      
+      // Add common plugins array that most browsers have
+      Object.defineProperty(navigator, 'plugins', { 
+        get: () => {
+          return [
+            { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+            { name: 'Chrome PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+            { name: 'Native Client', filename: 'internal-nacl-plugin', description: 'Native Client' }
+          ];
+        }
+      });
+      
+      // Common screen properties
+      Object.defineProperty(screen, 'colorDepth', { get: () => 24 });
+      
+      // Add common browser functions
+      window.chrome = {
+        app: {
+          isInstalled: false,
+          InstallState: { DISABLED: 'disabled', INSTALLED: 'installed', NOT_INSTALLED: 'not_installed' },
+          RunningState: { CANNOT_RUN: 'cannot_run', READY_TO_RUN: 'ready_to_run', RUNNING: 'running' }
+        },
+        runtime: {
+          PlatformOs: {
+            MAC: 'mac',
+            WIN: 'win',
+            ANDROID: 'android',
+            CROS: 'cros',
+            LINUX: 'linux',
+            OPENBSD: 'openbsd'
+          },
+          PlatformArch: {
+            ARM: 'arm',
+            X86_32: 'x86-32',
+            X86_64: 'x86-64'
+          },
+          PlatformNaclArch: {
+            ARM: 'arm',
+            X86_32: 'x86-32',
+            X86_64: 'x86-64'
+          },
+          RequestUpdateCheckStatus: {
+            THROTTLED: 'throttled',
+            NO_UPDATE: 'no_update',
+            UPDATE_AVAILABLE: 'update_available'
+          }
+        }
+      };
+      
+      // Override webdriver property
+      const _originalQuery = window.navigator.permissions.query;
+      window.navigator.permissions.query = (parameters) => {
+        if (parameters.name === 'notifications') {
+          return Promise.resolve({ state: Notification.permission });
+        }
+        return _originalQuery(parameters);
+      };
+      
+      // Override toString methods which often reveal automation
+      const originalFunction = Function.prototype.toString;
+      Function.prototype.toString = function() {
+        if (this === Function.prototype.toString) return originalFunction.call(this);
+        if (this === window.navigator.permissions.query) {
+          return "function query() { [native code] }";
+        }
+        return originalFunction.call(this);
+      };
+    });
+    
+    // Set realistic cookies
+    await page.setCookie({
+      name: '_ga',
+      value: `GA1.2.${Math.floor(Math.random() * 1000000000)}.${Math.floor(Date.now() / 1000) - Math.floor(Math.random() * 10000000)}`,
+      domain: '.aoneroom.com',
+      path: '/',
+      expires: Math.floor(Date.now() / 1000) + 86400 * 30,
+      httpOnly: false,
+      secure: true,
+      sameSite: 'None'
+    });
+    
+    // Automatically accept dialogs
+    page.on('dialog', async dialog => {
+      await dialog.accept();
+    });
   }
 
   /**
@@ -633,19 +934,23 @@ class MovieBoxController {
         return titleEl ? titleEl.textContent.trim() : 'Unknown';
       }, cards[movie.cardIndex]);
       
-      // Click on the "Watch now" button for this card
+      // Click on the "Watch now" button for this card with human behavior
       const watchButton = await cards[movie.cardIndex].$('.pc-card-btn');
       if (!watchButton) {
         throw new Error('Watch button not found');
       }
       
-      await watchButton.click();
+      // Apply human-like behavior
+      await this.simulateHumanScrolling(page);
+      await this.simulateHumanMouseMovement(page);
+      await this.humanDelay(800, 2000);
+      await this.humanClick(page, watchButton);
       
       // Wait for navigation to complete
       await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 45000 });
       
       // Wait a bit for page to initialize
-      await delay(2000);
+      await this.humanDelay(2000);
       
       // Get video URL with our enhanced method
       const videoUrl = await this.getVideoUrl(page);
@@ -785,19 +1090,20 @@ class MovieBoxController {
         throw new Error(`Card at index ${show.cardIndex} not found, only ${cards.length} cards available`);
       }
       
-      // Click on the "Watch now" button for this card
+      // Click on the "Watch now" button for this card with human behavior
       const watchButton = await cards[show.cardIndex].$('.pc-card-btn');
       if (!watchButton) {
         throw new Error('Watch button not found');
       }
       
-      await Promise.all([
-        watchButton.click(),
-        page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 60000 })
-      ]);
+      // Apply human-like behavior
+      await this.simulateHumanScrolling(page);
+      await this.simulateHumanMouseMovement(page);
+      await this.humanDelay(1000, 2500);
+      await this.humanClick(page, watchButton);
       
       // Wait longer for page to initialize
-      await delay(5000); // Increased from 2000
+      await this.humanDelay(5000); // Increased from 2000
       
       console.log(`Clicked on search result: ${show.title}`);
       console.log('Navigation completed, waiting for page to stabilize');
@@ -928,7 +1234,7 @@ class MovieBoxController {
       }
       
       // Wait longer for video player to load after selecting episode
-      await delay(5000); // Increased from 3000
+      await this.humanDelay(5000); // Increased from 3000
       
       // Get video URL with enhanced timeout
       const videoUrl = await this.getVideoUrl(page);
@@ -983,18 +1289,34 @@ class MovieBoxController {
   }
 
   /**
-   * Apply enhanced headers to request
+   * Helper method to perform human-like click on elements
    * @param {Object} page - Puppeteer page
+   * @param {Object} element - Page element to click
    */
-  async applyEnhancedPageHeaders(page) {
-    await page.setUserAgent(this.headers['User-Agent']);
-    await page.setExtraHTTPHeaders(this.headers);
-    
-    // Set Google as the referrer
-    await page.evaluateOnNewDocument(() => {
-      Object.defineProperty(document, 'referrer', { get: () => 'https://www.google.com/' });
-      Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
-    });
+  async humanClick(page, element) {
+    try {
+      const box = await element.boundingBox();
+      if (box) {
+        // Move to a random position within the element
+        const x = box.x + box.width * (0.3 + Math.random() * 0.4);
+        const y = box.y + box.height * (0.3 + Math.random() * 0.4);
+        
+        // Move mouse with multiple steps (more human-like)
+        await page.mouse.move(x, y, { steps: Math.floor(Math.random() * 4) + 2 });
+        
+        // Small delay before clicking (human reaction time)
+        await this.humanDelay(50, 200);
+        
+        // Click with a random delay
+        await page.mouse.click(x, y, { delay: Math.floor(Math.random() * 100) + 30 });
+      } else {
+        // Fallback to element.click() if boundingBox isn't available
+        await element.click({ delay: Math.floor(Math.random() * 100) + 30 });
+      }
+    } catch (error) {
+      // Fallback to regular click if human click fails
+      await element.click();
+    }
   }
 }
 

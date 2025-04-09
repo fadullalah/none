@@ -323,96 +323,13 @@ class MovieBoxController {
   }
 
   /**
-   * Select the highest video quality available
-   * @param {Object} page - Puppeteer page
-   * @returns {Promise<void>}
-   */
-  async selectHighestQuality(page) {
-    try {
-      // Check if quality selector exists
-      const qualitySelector = await page.$('.art-control-quality');
-      if (!qualitySelector) {
-        return;
-      }
-      
-      // Click on the quality selector to open the dropdown
-      await qualitySelector.click();
-      
-      // Wait for the quality options to appear
-      await delay(1000);
-      
-      // Find all quality options
-      const qualityOptions = await page.$$('.art-selector-item');
-      
-      if (!qualityOptions || qualityOptions.length === 0) {
-        return;
-      }
-      
-      // Get the quality values/labels
-      const qualities = await Promise.all(qualityOptions.map(async (option) => {
-        const text = await page.evaluate(el => el.textContent.trim(), option);
-        return {
-          element: option,
-          text: text,
-          value: text.toLowerCase() // Convert to lowercase for easier comparison
-        };
-      }));
-      
-      // Define quality ranking
-      const qualityRanking = {
-        '4k': 5,
-        '2160p': 5,
-        '1080p': 4,
-        '720p': 3,
-        '480p': 2,
-        '360p': 1
-      };
-      
-      // Find the highest quality option
-      let highestQuality = qualities[0];
-      let highestRank = 0;
-      
-      for (const quality of qualities) {
-        // Check against standard quality labels
-        for (const [label, rank] of Object.entries(qualityRanking)) {
-          if (quality.value.includes(label) && rank > highestRank) {
-            highestQuality = quality;
-            highestRank = rank;
-          }
-        }
-        
-        // Also check for direct numeric values (e.g., "1080")
-        const numericMatch = quality.value.match(/(\d+)/);
-        if (numericMatch) {
-          const numeric = parseInt(numericMatch[1], 10);
-          if (numeric > 0) {
-            // Compare to highest found so far
-            const currentHighestNumeric = parseInt(highestQuality.value.match(/(\d+)/)?.[1] || '0', 10);
-            if (numeric > currentHighestNumeric && !highestRank) {
-              highestQuality = quality;
-            }
-          }
-        }
-      }
-      
-      // Click on the highest quality option
-      await highestQuality.element.click();
-      
-      // Wait for video to adjust to new quality
-      await delay(2000);
-    } catch (error) {
-      // Continue execution even if quality selection fails
-    }
-  }
-
-  /**
-   * Get video URL from a movie or episode page
+   * Get video URL using the download button and quality selection
    * @param {Object} page - Puppeteer page
    * @returns {Promise<string>} - Direct video URL
    */
   async getVideoUrl(page) {
     try {
-      // Capture network requests to find video URLs
+      // Capture network requests to find video URLs as fallback
       const videoUrls = [];
       page.on('response', async (response) => {
         const url = response.url();
@@ -428,10 +345,120 @@ class MovieBoxController {
         }
       });
       
-      // Wait for the player to initialize
+      // Wait for the player and download button to initialize
       await delay(3000);
       
-      // First try: Check specifically for .art-video element (from the example)
+      // First try: Look for the download button and click it
+      console.log('Looking for download button...');
+      const downloadButtonSelector = '.pc-download-btn';
+      const downloadButton = await page.$(downloadButtonSelector);
+      
+      if (!downloadButton) {
+        console.log('Download button not found, trying alternative methods');
+        return this.fallbackGetVideoUrl(page, videoUrls);
+      }
+      
+      console.log('Download button found, clicking...');
+      await downloadButton.click();
+      
+      // Wait for the quality selection modal to appear
+      await delay(1000);
+      await page.waitForSelector('.pc-quality-list', { timeout: 5000 });
+      
+      // Find all quality options
+      const qualityItems = await page.$$('.pc-quality-list .pc-itm');
+      
+      if (!qualityItems || qualityItems.length === 0) {
+        console.log('No quality options found, trying alternative methods');
+        return this.fallbackGetVideoUrl(page, videoUrls);
+      }
+      
+      console.log(`Found ${qualityItems.length} quality options`);
+      
+      // Get the quality values
+      const qualities = await Promise.all(qualityItems.map(async (option, index) => {
+        const resolutionText = await page.evaluate(el => {
+          const resEl = el.querySelector('.pc-resolution');
+          return resEl ? resEl.textContent.trim() : '';
+        }, option);
+        
+        return {
+          element: option,
+          index: index,
+          resolution: resolutionText.toLowerCase()
+        };
+      }));
+      
+      console.log('Available qualities:', qualities.map(q => q.resolution).join(', '));
+      
+      // Find the highest quality option
+      let highestQuality = qualities[0];
+      
+      // Look for 1080p or the highest available
+      for (const quality of qualities) {
+        if (quality.resolution.includes('1080p') || quality.resolution.includes('1080')) {
+          highestQuality = quality;
+          break;
+        } else if (quality.resolution.includes('720p') && 
+                  !highestQuality.resolution.includes('1080')) {
+          highestQuality = quality;
+        } else if (quality.resolution.includes('480p') && 
+                  !highestQuality.resolution.includes('720') && 
+                  !highestQuality.resolution.includes('1080')) {
+          highestQuality = quality;
+        }
+      }
+      
+      console.log(`Selected highest quality: ${highestQuality.resolution}`);
+      
+      // Create a promise to capture the download URL
+      const downloadUrlPromise = new Promise((resolve) => {
+        page.on('request', request => {
+          const url = request.url();
+          if (url.includes('.mp4') || url.includes('/download/')) {
+            resolve(url);
+          }
+        });
+      });
+      
+      // Click on the highest quality option
+      await highestQuality.element.click();
+      
+      // Wait for the download to start and capture the URL (with timeout)
+      const downloadUrl = await Promise.race([
+        downloadUrlPromise,
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Download URL capture timeout')), 10000))
+      ]).catch(error => {
+        console.error('Error capturing download URL:', error.message);
+        return null;
+      });
+      
+      if (downloadUrl) {
+        console.log('Successfully captured download URL:', downloadUrl);
+        return downloadUrl;
+      }
+      
+      // If we couldn't get the URL from the download action, try fallback methods
+      console.log('Failed to capture download URL, trying fallback methods');
+      return this.fallbackGetVideoUrl(page, videoUrls);
+    } catch (error) {
+      console.error(`Error extracting video URL via download: ${error.message}`);
+      // Try fallback method if download approach fails
+      return this.fallbackGetVideoUrl(page, []);
+    }
+  }
+
+  /**
+   * Fallback method to get video URL if download button approach fails
+   * @param {Object} page - Puppeteer page
+   * @param {Array} capturedVideoUrls - Video URLs captured from network requests
+   * @returns {Promise<string>} - Direct video URL
+   */
+  async fallbackGetVideoUrl(page, capturedVideoUrls = []) {
+    try {
+      console.log('Using fallback method to get video URL');
+      
+      // First try: Check specifically for .art-video element
       let videoUrl = await page.evaluate(() => {
         const artVideo = document.querySelector('.art-video');
         if (artVideo && artVideo.src && artVideo.src.length > 0) {
@@ -498,16 +525,16 @@ class MovieBoxController {
       }
       
       // Check if any network requests captured video URLs
-      if (videoUrls.length > 0) {
+      if (capturedVideoUrls.length > 0) {
         // Prefer .mp4 over other formats
-        const mp4Urls = videoUrls.filter(url => url.includes('.mp4'));
+        const mp4Urls = capturedVideoUrls.filter(url => url.includes('.mp4'));
         if (mp4Urls.length > 0) {
           console.log('Found MP4 URL from network requests:', mp4Urls[0]);
           return mp4Urls[0];
         }
         
-        console.log('Found video URL from network requests:', videoUrls[0]);
-        return videoUrls[0];
+        console.log('Found video URL from network requests:', capturedVideoUrls[0]);
+        return capturedVideoUrls[0];
       }
       
       // Take a screenshot for debugging
@@ -516,7 +543,7 @@ class MovieBoxController {
       
       throw new Error('No video URL found on page');
     } catch (error) {
-      console.error(`Error extracting video URL: ${error.message}`);
+      console.error(`Error in fallback video URL extraction: ${error.message}`);
       throw error;
     }
   }

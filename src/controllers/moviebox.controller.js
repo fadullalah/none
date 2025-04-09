@@ -273,17 +273,17 @@ class MovieBoxController {
       browser = await this.getBrowser();
       page = await browser.newPage();
       
-      // Optimize page for speed
-      await page.setRequestInterception(true);
-      page.on('request', (request) => {
-        // Block unnecessary resources
-        const resourceType = request.resourceType();
-        if (['image', 'font'].includes(resourceType)) {
-          request.abort();
-        } else {
-          request.continue();
-        }
-      });
+      // Remove request interception - load everything
+      // await page.setRequestInterception(true);
+      // page.on('request', (request) => {
+      //   // Block unnecessary resources
+      //   const resourceType = request.resourceType();
+      //   if (['image', 'font'].includes(resourceType)) {
+      //     request.abort();
+      //   } else {
+      //     request.continue();
+      //   }
+      // });
       
       // Apply enhanced headers for better anonymity
       await this.applyEnhancedPageHeaders(page);
@@ -291,8 +291,8 @@ class MovieBoxController {
       
       // Navigate to search page with faster load strategy
       const response = await page.goto(searchUrl, { 
-        waitUntil: 'domcontentloaded', 
-        timeout: 30000 
+        waitUntil: 'networkidle0',  // Wait until there are no network connections for at least 500ms
+        timeout: 45000  // Increased timeout to allow for complete loading
       });
       
       if (!response.ok()) {
@@ -960,34 +960,34 @@ class MovieBoxController {
       browser = await this.getBrowser();
       page = await browser.newPage();
       
-      // Set up request interception but allow more resources
-      await page.setRequestInterception(true);
-      page.on('request', (request) => {
-        const resourceType = request.resourceType();
-        const url = request.url();
-        
-        // Allow resources that might be related to video player
-        if (resourceType === 'media' || 
-            url.includes('.mp4') || 
-            url.includes('.m3u8') || 
-            url.includes('playlist') || 
-            url.includes('player')) {
-          request.continue();
-        } 
-        // Block less important resources
-        else if (['image', 'font'].includes(resourceType)) {
-          request.abort();
-        } else {
-          request.continue();
-        }
-      });
+      // Remove request interception to load all resources
+      // await page.setRequestInterception(true);
+      // page.on('request', (request) => {
+      //   const resourceType = request.resourceType();
+      //   const url = request.url();
+      //   
+      //   // Allow resources that might be related to video player
+      //   if (resourceType === 'media' || 
+      //       url.includes('.mp4') || 
+      //       url.includes('.m3u8') || 
+      //       url.includes('playlist') || 
+      //       url.includes('player')) {
+      //     request.continue();
+      //   } 
+      //   // Block less important resources
+      //   else if (['image', 'font'].includes(resourceType)) {
+      //     request.abort();
+      //   } else {
+      //     request.continue();
+      //   }
+      // });
       
       await this.applyEnhancedPageHeaders(page);
       await page.setDefaultNavigationTimeout(45000);
       
       // Navigate to search page
       const searchUrl = `${this.searchUrl}?keyword=${encodeURIComponent(title)}`;
-      await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
+      await page.goto(searchUrl, { waitUntil: 'networkidle0', timeout: 45000 });
       
       // SCREENSHOT 1: Search results page
       const searchScreenshot = await this.captureAndUploadScreenshot(page, `movie-search-results-${tmdbId}`);
@@ -1143,34 +1143,34 @@ class MovieBoxController {
       browser = await this.getBrowser();
       page = await browser.newPage();
       
-      // Set up request interception for better performance
-      await page.setRequestInterception(true);
-      page.on('request', (request) => {
-        const resourceType = request.resourceType();
-        const url = request.url();
-        
-        // Allow resources that might be related to video player
-        if (resourceType === 'media' || 
-            url.includes('.mp4') || 
-            url.includes('.m3u8') || 
-            url.includes('playlist') || 
-            url.includes('player')) {
-          request.continue();
-        } 
-        // Block less important resources
-        else if (['image', 'font'].includes(resourceType)) {
-          request.abort();
-        } else {
-          request.continue();
-        }
-      });
+      // Remove request interception to load all resources
+      // await page.setRequestInterception(true);
+      // page.on('request', (request) => {
+      //   const resourceType = request.resourceType();
+      //   const url = request.url();
+      //   
+      //   // Allow resources that might be related to video player
+      //   if (resourceType === 'media' || 
+      //       url.includes('.mp4') || 
+      //       url.includes('.m3u8') || 
+      //       url.includes('playlist') || 
+      //       url.includes('player')) {
+      //     request.continue();
+      //   } 
+      //   // Block less important resources
+      //   else if (['image', 'font'].includes(resourceType)) {
+      //     request.abort();
+      //   } else {
+      //     request.continue();
+      //   }
+      // });
       
       await this.applyEnhancedPageHeaders(page);
       await page.setDefaultNavigationTimeout(60000);
       
       // Navigate to search page
       const searchUrl = `${this.searchUrl}?keyword=${encodeURIComponent(title)}`;
-      await page.goto(searchUrl, { waitUntil: 'networkidle2', timeout: 60000 });
+      await page.goto(searchUrl, { waitUntil: 'networkidle0', timeout: 60000 });
       
       // SCREENSHOT 1: Search results page
       const searchScreenshot = await this.captureAndUploadScreenshot(page, `tv-search-results-${tmdbId}`);

@@ -120,9 +120,21 @@ class MovieBoxController {
    * @returns {Promise<Object>} - Movie details
    */
   async getMovieDetailsFromTMDB(tmdbId) {
+    const cacheKey = `tmdb_movie_${tmdbId}`;
+    
+    // Check cache first
+    const cachedDetails = movieboxCache.get(cacheKey);
+    if (cachedDetails) {
+      console.log(`Using cached TMDB movie details for ID ${tmdbId}`);
+      return cachedDetails;
+    }
+    
     try {
-      const url = `${this.tmdbApiBaseUrl}/movie/${tmdbId}?api_key=${this.tmdbApiKey}&language=en-US`;
+      const url = `${this.tmdbApiBaseUrl}/movie/${tmdbId}?api_key=${this.tmdbApiKey}&language=ar`;
       const response = await axios.get(url, { headers: this.headers });
+      
+      // Cache the results
+      movieboxCache.set(cacheKey, response.data, 86400); // Cache for 24 hours
       return response.data;
     } catch (error) {
       const statusCode = error.response?.status || 'No status code';
@@ -138,9 +150,21 @@ class MovieBoxController {
    * @returns {Promise<Object>} - TV show details
    */
   async getTVDetailsFromTMDB(tmdbId) {
+    const cacheKey = `tmdb_tv_${tmdbId}`;
+    
+    // Check cache first
+    const cachedDetails = movieboxCache.get(cacheKey);
+    if (cachedDetails) {
+      console.log(`Using cached TMDB TV details for ID ${tmdbId}`);
+      return cachedDetails;
+    }
+    
     try {
-      const url = `${this.tmdbApiBaseUrl}/tv/${tmdbId}?api_key=${this.tmdbApiKey}&language=en-US`;
+      const url = `${this.tmdbApiBaseUrl}/tv/${tmdbId}?api_key=${this.tmdbApiKey}&language=ar`;
       const response = await axios.get(url, { headers: this.headers });
+      
+      // Cache the results
+      movieboxCache.set(cacheKey, response.data, 86400); // Cache for 24 hours
       return response.data;
     }
     catch (error) {
@@ -159,8 +183,10 @@ class MovieBoxController {
   async search(query) {
     const cacheKey = `moviebox_search_${query}`;
     
+    // Check cache first
     const cachedResults = movieboxCache.get(cacheKey);
     if (cachedResults) {
+      console.log(`Using cached search results for "${query}"`);
       return cachedResults;
     }
     
@@ -242,10 +268,8 @@ class MovieBoxController {
         return shows;
       });
       
-      // Cache results
+      // Add caching of results before returning
       movieboxCache.set(cacheKey, searchResults, 21600); // Cache for 6 hours
-      
-      await page.close(); // Close page but keep browser
       return searchResults;
     } catch (error) {
       console.error(`Error searching MovieBox: ${error.message}`);
@@ -271,6 +295,17 @@ class MovieBoxController {
    * @returns {Promise<Array>} - Search results
    */
   async enhancedSearch(details) {
+    // Generate a cache key based on details
+    const detailsHash = JSON.stringify(details).slice(0, 100); // First 100 chars as hash
+    const cacheKey = `moviebox_enhanced_search_${Buffer.from(detailsHash).toString('base64')}`;
+    
+    // Check cache first
+    const cachedResults = movieboxCache.get(cacheKey);
+    if (cachedResults) {
+      console.log(`Using cached enhanced search results`);
+      return cachedResults;
+    }
+    
     const title = details.title || details.name || '';
     const originalTitle = details.original_title || details.original_name || '';
     const allSearchAttempts = [];
@@ -285,6 +320,8 @@ class MovieBoxController {
       allSearchAttempts.push({ query: title, results: searchResults.length });
       
       if (searchResults.length > 0) {
+        // Add caching of results before returning
+        movieboxCache.set(cacheKey, searchResults, 21600); // Cache for 6 hours
         return searchResults;
       }
     } catch (error) {
@@ -299,6 +336,8 @@ class MovieBoxController {
         allSearchAttempts.push({ query: originalTitle, results: searchResults.length });
         
         if (searchResults.length > 0) {
+          // Add caching of results before returning
+          movieboxCache.set(cacheKey, searchResults, 21600); // Cache for 6 hours
           return searchResults;
         }
       } catch (error) {
@@ -316,6 +355,8 @@ class MovieBoxController {
         allSearchAttempts.push({ query: mainTitle, results: searchResults.length });
         
         if (searchResults.length > 0) {
+          // Add caching of results before returning
+          movieboxCache.set(cacheKey, searchResults, 21600); // Cache for 6 hours
           return searchResults;
         }
       } catch (error) {
@@ -333,6 +374,8 @@ class MovieBoxController {
         allSearchAttempts.push({ query: shortTitle, results: searchResults.length });
         
         if (searchResults.length > 0) {
+          // Add caching of results before returning
+          movieboxCache.set(cacheKey, searchResults, 21600); // Cache for 6 hours
           return searchResults;
         }
       } catch (error) {
@@ -341,6 +384,8 @@ class MovieBoxController {
     }
     
     console.log('All search strategies exhausted. Search attempts:', allSearchAttempts);
+    // Add caching of results before returning
+    movieboxCache.set(cacheKey, [], 21600); // Cache for 6 hours
     return [];
   }
 
@@ -448,6 +493,18 @@ class MovieBoxController {
    * @returns {Promise<string>} - Direct video URL
    */
   async getVideoUrl(page) {
+    // Since page is a Puppeteer page object, we need a different approach
+    // We can extract the current URL from the page and use that as cache key
+    const url = await page.url();
+    const cacheKey = `moviebox_video_url_${Buffer.from(url).toString('base64')}`;
+    
+    // Check cache first
+    const cachedUrl = movieboxCache.get(cacheKey);
+    if (cachedUrl) {
+      console.log(`Using cached video URL for ${url}`);
+      return cachedUrl;
+    }
+    
     try {
       console.log(`Attempting to extract video URL from: ${page.url()}`);
       
@@ -551,6 +608,8 @@ class MovieBoxController {
       // If we found a video URL through DOM methods, return it
       if (videoUrl) {
         console.log(`Found video URL through DOM: ${videoUrl}`);
+        // Add caching of video URL before returning
+        movieboxCache.set(cacheKey, videoUrl, 3600); // Cache for 1 hour
         return videoUrl;
       }
       
@@ -560,10 +619,14 @@ class MovieBoxController {
         const mp4Urls = videoUrls.filter(url => url.includes('.mp4'));
         if (mp4Urls.length > 0) {
           console.log(`Using MP4 URL from network capture: ${mp4Urls[0]}`);
+          // Add caching of video URL before returning
+          movieboxCache.set(cacheKey, mp4Urls[0], 3600); // Cache for 1 hour
           return mp4Urls[0];
         }
         
         console.log(`Using URL from network capture: ${videoUrls[0]}`);
+        // Add caching of video URL before returning
+        movieboxCache.set(cacheKey, videoUrls[0], 3600); // Cache for 1 hour
         return videoUrls[0];
       }
       
@@ -617,6 +680,8 @@ class MovieBoxController {
       
       if (videoUrl) {
         console.log(`Found video URL through player API or global scan: ${videoUrl}`);
+        // Add caching of video URL before returning
+        movieboxCache.set(cacheKey, videoUrl, 3600); // Cache for 1 hour
         return videoUrl;
       }
       
@@ -647,10 +712,18 @@ class MovieBoxController {
    * @param {*} res - Express response object
    */
   async getMovieByTmdbId(req, res) {
+    const tmdbId = req.params.tmdbId;
+    const cacheKey = `moviebox_movie_${tmdbId}`;
+    
+    // Check cache first
+    const cachedResponse = movieboxCache.get(cacheKey);
+    if (cachedResponse) {
+      console.log(`Using cached movie details for TMDB ID ${tmdbId}`);
+      return res.json(cachedResponse);
+    }
+    
     let browser, page;
     try {
-      const tmdbId = req.params.tmdbId;
-      
       // Get movie details from TMDB
       const movieDetails = await this.getMovieDetailsFromTMDB(tmdbId);
       
@@ -763,13 +836,17 @@ class MovieBoxController {
       
       await page.close();
       
-      return res.json({
+      // Cache the successful response
+      const responseData = {
         success: true,
         title: movie.title,
         poster: movie.image,
         rating: movie.rating,
         player_url: videoUrl
-      });
+      };
+      
+      movieboxCache.set(cacheKey, responseData, 7200); // Cache for 2 hours
+      return res.json(responseData);
     } catch (error) {
       console.error(`Error getting movie from MovieBox: ${error.message}`);
       
@@ -813,12 +890,21 @@ class MovieBoxController {
    * @param {*} res - Express response object
    */
   async getTvEpisodeByTmdbId(req, res) {
+    const tmdbId = req.params.tmdbId;
+    const season = parseInt(req.query.season, 10);
+    const episode = parseInt(req.query.episode, 10);
+    
+    const cacheKey = `moviebox_tv_${tmdbId}_s${season}_e${episode}`;
+    
+    // Check cache first
+    const cachedResponse = movieboxCache.get(cacheKey);
+    if (cachedResponse) {
+      console.log(`Using cached TV episode details for TMDB ID ${tmdbId}, S${season}E${episode}`);
+      return res.json(cachedResponse);
+    }
+    
     let browser, page;
     try {
-      const tmdbId = req.params.tmdbId;
-      const season = parseInt(req.query.season, 10);
-      const episode = parseInt(req.query.episode, 10);
-      
       if (isNaN(season) || isNaN(episode)) {
         return res.status(400).json({
           success: false,
@@ -1030,13 +1116,17 @@ class MovieBoxController {
       
       await page.close();
       
-      return res.json({
+      // Cache the successful response
+      const responseData = {
         success: true,
         title: `${show.title} - S${season}E${episode}`,
         poster: show.image,
         rating: show.rating,
         player_url: videoUrl
-      });
+      };
+      
+      movieboxCache.set(cacheKey, responseData, 7200); // Cache for 2 hours
+      return res.json(responseData);
     } catch (error) {
       console.error(`Error getting TV episode from MovieBox: ${error.message}`);
       
@@ -1067,8 +1157,6 @@ class MovieBoxController {
         message: 'Failed to get TV episode from MovieBox',
         error: error.message,
         error_details: {
-          stack: error.stack.split('\n')[0],
-          timestamp: new Date().toISOString(),
           request_params: {
             tmdb_id: req.params.tmdbId,
             season: req.query.season,
@@ -1732,7 +1820,8 @@ class MovieBoxController {
       
       await page.close();
       
-      return res.json({
+      // Cache the successful response
+      const responseData = {
         success: true,
         episode_info: {
           show_title: show.title,
@@ -1742,7 +1831,10 @@ class MovieBoxController {
         },
         subtitle_url: subtitleData.url,
         subtitle_data: response.data
-      });
+      };
+      
+      movieboxCache.set(cacheKey, responseData, 7200); // Cache for 2 hours
+      return res.json(responseData);
     } catch (error) {
       console.error(`Error getting TV episode subtitles from MovieBox: ${error.message}`);
       
@@ -1776,6 +1868,12 @@ class MovieBoxController {
         }
       });
     }
+  }
+
+  // Add cache cleanup method
+  async clearCache() {
+    movieboxCache.flushAll();
+    console.log('MovieBox cache cleared');
   }
 }
 

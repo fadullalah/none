@@ -15,8 +15,52 @@ let browserInstance = null;
 let browserLastUsed = 0;
 const BROWSER_IDLE_TIMEOUT = 300000; // 5 minutes
 
+// Add these cache-related variables after the delay function
+const movieBoxCache = new Map();
+const CACHE_TTL = 86400000; // 24 hours in milliseconds
+const MAX_CACHE_SIZE = 1000; // Maximum number of items in cache
+
+// Add a cache cleanup function
+function cleanupCache() {
+  const now = Date.now();
+  
+  // Clean movieBoxCache
+  let expiredCount = 0;
+  for (const [key, value] of movieBoxCache.entries()) {
+    if (value.expiry < now) {
+      movieBoxCache.delete(key);
+      expiredCount++;
+    }
+  }
+  
+  if (expiredCount > 0) {
+    console.log(`[MovieBoxCache] Cleanup: Removed ${expiredCount} expired cache entries`);
+  }
+  
+  // Implement LRU-like eviction if cache is too large
+  if (movieBoxCache.size > MAX_CACHE_SIZE) {
+    // Sort by expiry and remove oldest
+    const sortedEntries = [...movieBoxCache.entries()]
+      .sort((a, b) => a[1].expiry - b[1].expiry);
+    
+    const entriesToRemove = sortedEntries.slice(0, movieBoxCache.size - MAX_CACHE_SIZE);
+    for (const [key] of entriesToRemove) {
+      movieBoxCache.delete(key);
+    }
+    console.log(`[MovieBoxCache] Size limit reached: Evicted ${entriesToRemove.length} oldest entries`);
+  }
+}
+
+// Run cleanup every 30 minutes
+setInterval(cleanupCache, 30 * 60 * 1000);
+
 // Helper function to replace waitForTimeout
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+// Helper function to get time difference
+function getTimeDiff(startTime) {
+  return `${(performance.now() - startTime).toFixed(2)}ms`;
+}
 
 class MovieBoxController {
   constructor() {
@@ -1007,14 +1051,27 @@ class MovieBoxController {
    * @param {*} res - Express response object
    */
   async getMovieByTmdbId(req, res) {
+    const totalStartTime = performance.now();
     const tmdbId = req.params.tmdbId;
-    const cacheKey = `moviebox_movie_${tmdbId}`;
     
     // Check cache first
-    const cachedResponse = movieboxCache.get(cacheKey);
-    if (cachedResponse) {
-      console.log(`Using cached movie details for TMDB ID ${tmdbId}`);
-      return res.json(cachedResponse);
+    const cacheKey = `movie-${tmdbId}`;
+    if (movieBoxCache.has(cacheKey)) {
+      const cachedData = movieBoxCache.get(cacheKey);
+      if (cachedData.expiry > Date.now()) {
+        console.log(`[MovieBoxCache] Serving cached response for movie: ${tmdbId}`);
+        return res.json({
+          ...cachedData.data,
+          timing: {
+            ...cachedData.data.timing,
+            total: getTimeDiff(totalStartTime),
+            fromCache: true
+          }
+        });
+      } else {
+        console.log(`[MovieBoxCache] Expired cache for movie: ${tmdbId}`);
+        movieBoxCache.delete(cacheKey);
+      }
     }
     
     let browser, page;
@@ -1100,8 +1157,19 @@ class MovieBoxController {
         api_data: apiData // Include the API data for debugging or additional info
       };
       
-      movieboxCache.set(cacheKey, responseData, 7200); // Cache for 2 hours
-      return res.json(responseData);
+      // After successful data retrieval, add to cache before returning
+      movieBoxCache.set(cacheKey, {
+        data: responseData,
+        expiry: Date.now() + CACHE_TTL
+      });
+      
+      console.log(`[Time] Total movie request time: ${getTimeDiff(totalStartTime)}`);
+      return res.json({
+        ...responseData,
+        timing: {
+          total: getTimeDiff(totalStartTime)
+        }
+      });
     } catch (error) {
       console.error(`Error getting movie from MovieBox: ${error.message}`);
       
@@ -1129,17 +1197,27 @@ class MovieBoxController {
    * @param {*} res - Express response object
    */
   async getTvEpisodeByTmdbId(req, res) {
-    const tmdbId = req.params.tmdbId;
-    const season = parseInt(req.query.season, 10);
-    const episode = parseInt(req.query.episode, 10);
-    
-    const cacheKey = `moviebox_tv_${tmdbId}_s${season}_e${episode}`;
+    const totalStartTime = performance.now();
+    const { tmdbId, season, episode } = req.params;
     
     // Check cache first
-    const cachedResponse = movieboxCache.get(cacheKey);
-    if (cachedResponse) {
-      console.log(`Using cached TV episode details for TMDB ID ${tmdbId}, S${season}E${episode}`);
-      return res.json(cachedResponse);
+    const cacheKey = `tv-${tmdbId}-${season}-${episode}`;
+    if (movieBoxCache.has(cacheKey)) {
+      const cachedData = movieBoxCache.get(cacheKey);
+      if (cachedData.expiry > Date.now()) {
+        console.log(`[MovieBoxCache] Serving cached response for TV: ${tmdbId} S${season}E${episode}`);
+        return res.json({
+          ...cachedData.data,
+          timing: {
+            ...cachedData.data.timing,
+            total: getTimeDiff(totalStartTime),
+            fromCache: true
+          }
+        });
+      } else {
+        console.log(`[MovieBoxCache] Expired cache for TV: ${tmdbId} S${season}E${episode}`);
+        movieBoxCache.delete(cacheKey);
+      }
     }
     
     let browser, page;
@@ -1239,8 +1317,19 @@ class MovieBoxController {
         api_data: apiData // Include the API data for debugging or additional info
       };
       
-      movieboxCache.set(cacheKey, responseData, 7200); // Cache for 2 hours
-      return res.json(responseData);
+      // After successful data retrieval, add to cache before returning
+      movieBoxCache.set(cacheKey, {
+        data: responseData,
+        expiry: Date.now() + CACHE_TTL
+      });
+      
+      console.log(`[Time] Total TV request time: ${getTimeDiff(totalStartTime)}`);
+      return res.json({
+        ...responseData,
+        timing: {
+          total: getTimeDiff(totalStartTime)
+        }
+      });
     } catch (error) {
       console.error(`Error getting TV episode from MovieBox: ${error.message}`);
       
@@ -1348,6 +1437,29 @@ class MovieBoxController {
    * @param {*} res - Express response object
    */
   async getMovieSubtitlesByTmdbId(req, res) {
+    const totalStartTime = performance.now();
+    const tmdbId = req.params.tmdbId;
+    
+    // Check cache first
+    const cacheKey = `movie-subtitles-${tmdbId}`;
+    if (movieBoxCache.has(cacheKey)) {
+      const cachedData = movieBoxCache.get(cacheKey);
+      if (cachedData.expiry > Date.now()) {
+        console.log(`[MovieBoxCache] Serving cached subtitles for movie: ${tmdbId}`);
+        return res.json({
+          ...cachedData.data,
+          timing: {
+            ...cachedData.data.timing,
+            total: getTimeDiff(totalStartTime),
+            fromCache: true
+          }
+        });
+      } else {
+        console.log(`[MovieBoxCache] Expired subtitle cache for movie: ${tmdbId}`);
+        movieBoxCache.delete(cacheKey);
+      }
+    }
+    
     let browser, page;
     try {
       const tmdbId = req.params.tmdbId;
@@ -1491,7 +1603,8 @@ class MovieBoxController {
       
       await page.close();
       
-      return res.json({
+      // Create the response data
+      const responseData = {
         success: true,
         movie_info: {
           title: movie.title,
@@ -1499,7 +1612,16 @@ class MovieBoxController {
         },
         subtitle_url: subtitleData.url,
         subtitle_data: response.data
+      };
+      
+      // Cache the successful response with the properly defined cacheKey
+      movieBoxCache.set(cacheKey, {
+        data: responseData,
+        expiry: Date.now() + CACHE_TTL
       });
+      
+      console.log(`[Time] Total movie subtitles request time: ${getTimeDiff(totalStartTime)}`);
+      return res.json(responseData);
     } catch (error) {
       console.error(`Error getting movie subtitles from MovieBox: ${error.message}`);
       
@@ -1527,6 +1649,29 @@ class MovieBoxController {
    * @param {*} res - Express response object
    */
   async getTvEpisodeSubtitlesByTmdbId(req, res) {
+    const totalStartTime = performance.now();
+    const { tmdbId, season, episode } = req.params;
+    
+    // Check cache first
+    const cacheKey = `tv-subtitles-${tmdbId}-${season}-${episode}`;
+    if (movieBoxCache.has(cacheKey)) {
+      const cachedData = movieBoxCache.get(cacheKey);
+      if (cachedData.expiry > Date.now()) {
+        console.log(`[MovieBoxCache] Serving cached subtitles for TV: ${tmdbId} S${season}E${episode}`);
+        return res.json({
+          ...cachedData.data,
+          timing: {
+            ...cachedData.data.timing,
+            total: getTimeDiff(totalStartTime),
+            fromCache: true
+          }
+        });
+      } else {
+        console.log(`[MovieBoxCache] Expired subtitle cache for TV: ${tmdbId} S${season}E${episode}`);
+        movieBoxCache.delete(cacheKey);
+      }
+    }
+    
     let browser, page;
     try {
       const tmdbId = req.params.tmdbId;
@@ -1991,8 +2136,10 @@ class MovieBoxController {
 
   // Add cache cleanup method
   async clearCache() {
-    movieboxCache.flushAll();
-    console.log('MovieBox cache cleared');
+    const cacheSize = movieBoxCache.size;
+    movieBoxCache.clear();
+    console.log(`[MovieBoxCache] Cleared ${cacheSize} items from cache`);
+    return { cleared: cacheSize };
   }
 
   /**

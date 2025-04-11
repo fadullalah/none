@@ -79,9 +79,9 @@ class MovieBoxController {
    */
   async getBrowser() {
     if (!browserInstance) {
-      console.log('Creating new browser instance for MovieBox in visible mode');
+      console.log('Creating new browser instance for MovieBox in headless mode');
       browserInstance = await puppeteerExtra.launch({
-        headless: false,  // Changed from "new" to false to make browser visible
+        headless: "new",  // Changed from false to "new" to make browser headless
         defaultViewport: {
           width: 1366,
           height: 768
@@ -98,8 +98,7 @@ class MovieBoxController {
           '--disable-infobars'
         ],
         ignoreDefaultArgs: ['--enable-automation'], // Hide automation
-        // Add slowMo to slow down operations for better visibility
-        slowMo: 50 // Slows down Puppeteer operations by 50ms
+        slowMo: 20 // Reduced from 50ms to 20ms since we don't need to see operations
       });
     }
     
@@ -112,11 +111,10 @@ class MovieBoxController {
    */
   async cleanupBrowser() {
     if (browserInstance && Date.now() - browserLastUsed > BROWSER_IDLE_TIMEOUT) {
-      console.log('Browser has been idle for too long. Would normally close it, but keeping it open for debugging.');
-      // In debug mode, don't close the browser automatically
-      // Uncomment the next lines to restore automatic closing:
-      // await browserInstance.close();
-      // browserInstance = null;
+      console.log('Browser has been idle for too long. Closing it automatically.');
+      // In headless mode, we can automatically close the browser
+      await browserInstance.close();
+      browserInstance = null;
     }
   }
 

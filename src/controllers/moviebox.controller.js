@@ -130,7 +130,7 @@ class MovieBoxController {
     }
     
     try {
-      const url = `${this.tmdbApiBaseUrl}/movie/${tmdbId}?api_key=${this.tmdbApiKey}&language=ar`;
+      const url = `${this.tmdbApiBaseUrl}/movie/${tmdbId}?api_key=${this.tmdbApiKey}&language=en-US`;
       const response = await axios.get(url, { headers: this.headers });
       
       // Cache the results
@@ -160,7 +160,7 @@ class MovieBoxController {
     }
     
     try {
-      const url = `${this.tmdbApiBaseUrl}/tv/${tmdbId}?api_key=${this.tmdbApiKey}&language=ar`;
+      const url = `${this.tmdbApiBaseUrl}/tv/${tmdbId}?api_key=${this.tmdbApiKey}&language=en-US`;
       const response = await axios.get(url, { headers: this.headers });
       
       // Cache the results
@@ -707,6 +707,212 @@ class MovieBoxController {
   }
 
   /**
+   * Extract subject ID from search results
+   * @param {Object} page - Puppeteer page
+   * @param {number} cardIndex - Index of the card to extract subject ID from
+   * @returns {Promise<string|null>} - Subject ID
+   */
+  async extractSubjectId(page, cardIndex) {
+    try {
+      console.log(`Attempting to extract subject ID from card at index ${cardIndex}`);
+      
+      // First try to extract from network requests
+      const subjectIdFromRequests = await page.evaluate(() => {
+        if (window.performance && window.performance.getEntries) {
+          const entries = window.performance.getEntries();
+          for (const entry of entries) {
+            if (entry.name && entry.name.includes('/subject/detail?subjectId=')) {
+              const match = entry.name.match(/subjectId=([0-9]+)/);
+              if (match && match[1]) return match[1];
+            }
+          }
+        }
+        return null;
+      });
+      
+      if (subjectIdFromRequests) {
+        console.log(`Found subject ID from network requests: ${subjectIdFromRequests}`);
+        return subjectIdFromRequests;
+      }
+      
+      // If that fails, click on the card to navigate and capture the ID from the URL
+      const cards = await page.$$('.pc-card');
+      if (cards.length <= cardIndex) {
+        throw new Error(`Card at index ${cardIndex} not found, only ${cards.length} cards available`);
+      }
+      
+      // Get actual card title to confirm selection
+      const cardTitle = await page.evaluate(el => {
+        const titleEl = el.querySelector('.pc-card-title');
+        return titleEl ? titleEl.textContent.trim() : 'Unknown';
+      }, cards[cardIndex]);
+      
+      console.log(`Clicking on card: "${cardTitle}" (index ${cardIndex})`);
+      
+      // Enable request interception to capture API requests
+      await page.setRequestInterception(true);
+      
+      const subjectIdPromise = new Promise((resolve) => {
+        page.on('request', request => {
+          const url = request.url();
+          if (url.includes('/subject/detail?subjectId=')) {
+            const match = url.match(/subjectId=([0-9]+)/);
+            if (match && match[1]) {
+              console.log(`Captured subject ID from request: ${match[1]}`);
+              resolve(match[1]);
+            }
+          }
+          request.continue();
+        });
+        
+        // Set a timeout to avoid hanging
+        setTimeout(() => resolve(null), 10000);
+      });
+      
+      // Click on the "Watch now" button for this card
+      const watchButton = await cards[cardIndex].$('.pc-card-btn');
+      if (!watchButton) {
+        throw new Error('Watch button not found');
+      }
+      
+      await watchButton.click();
+      
+      // Wait for navigation or subject ID capture
+      const subjectId = await subjectIdPromise;
+      if (subjectId) {
+        return subjectId;
+      }
+      
+      // If we're here, we need to check the current URL
+      const url = page.url();
+      console.log(`Current page URL: ${url}`);
+      
+      // Check for detail URL pattern
+      const subjectIdMatch = url.match(/\/detail\?subjectId=([0-9]+)/);
+      if (subjectIdMatch && subjectIdMatch[1]) {
+        console.log(`Extracted subject ID from URL: ${subjectIdMatch[1]}`);
+        return subjectIdMatch[1];
+      }
+      
+      // Last resort: look for any subject ID on the page
+      const pageSubjectId = await page.evaluate(() => {
+        // Check for API calls in the network log
+        if (window.performance && window.performance.getEntries) {
+          const entries = window.performance.getEntries();
+          for (const entry of entries) {
+            if (entry.name && (
+                entry.name.includes('/subject/detail?subjectId=') || 
+                entry.name.includes('/subject/play?subjectId=')
+            )) {
+              const match = entry.name.match(/subjectId=([0-9]+)/);
+              if (match && match[1]) return match[1];
+            }
+          }
+        }
+        
+        // Look for any data attributes on the page
+        const dataElements = document.querySelectorAll('[data-id]');
+        for (const el of dataElements) {
+          if (el.dataset.id) return el.dataset.id;
+        }
+        
+        // Look for IDs in page text content
+        const pageText = document.body.innerText;
+        const idMatch = pageText.match(/ID:\s*(\d+)/i);
+        if (idMatch && idMatch[1]) return idMatch[1];
+        
+        return null;
+      });
+      
+      if (pageSubjectId) {
+        console.log(`Found subject ID from page evaluation: ${pageSubjectId}`);
+        return pageSubjectId;
+      }
+      
+      console.error('Failed to extract subject ID using all methods');
+      return null;
+    } catch (error) {
+      console.error(`Error extracting subject ID: ${error.message}`);
+      return null;
+    }
+  }
+
+  /**
+   * Get direct API data for movie or TV show
+   * @param {string} subjectId - Subject ID
+   * @param {number|null} season - Season number for TV shows
+   * @param {number|null} episode - Episode number for TV shows
+   * @returns {Promise<Object>} - API response
+   */
+  async getDirectApiData(subjectId, season = null, episode = null) {
+    try {
+      let apiUrl = `${this.baseUrl}/wefeed-h5-bff/web/subject/play?subjectId=${subjectId}`;
+      
+      // Add season and episode parameters for TV shows
+      if (season !== null && episode !== null) {
+        apiUrl += `&se=${season}&ep=${episode}`;
+      }
+      
+      console.log(`Fetching data from API: ${apiUrl}`);
+      
+      const response = await axios.get(apiUrl, {
+        headers: this.headers,
+        timeout: 30000
+      });
+      
+      return response.data;
+    } catch (error) {
+      console.error(`Error fetching API data: ${error.message}`);
+      throw new Error(`Failed to fetch data from MovieBox API: ${error.message}`);
+    }
+  }
+
+  /**
+   * Extract video URL from API response
+   * @param {Object} apiData - API response data
+   * @returns {string|null} - Direct video URL
+   */
+  extractVideoUrlFromApiResponse(apiData) {
+    try {
+      console.log('Extracting video URL from API response');
+      
+      // Log a sample of the API data for debugging
+      console.log('API data sample:', JSON.stringify(apiData).substring(0, 500));
+      
+      // Check common paths in the API response where video URLs might be found
+      if (apiData.data && apiData.data.videoInfo && apiData.data.videoInfo.url) {
+        return apiData.data.videoInfo.url;
+      }
+      
+      if (apiData.data && apiData.data.url) {
+        return apiData.data.url;
+      }
+      
+      if (apiData.data && apiData.data.playInfo && apiData.data.playInfo.url) {
+        return apiData.data.playInfo.url;
+      }
+      
+      // Check for m3u8 or mp4 URLs anywhere in the response
+      const apiDataStr = JSON.stringify(apiData);
+      const m3u8Match = apiDataStr.match(/"(https?:\/\/[^"]+\.m3u8[^"]*)"/);
+      if (m3u8Match && m3u8Match[1]) {
+        return m3u8Match[1];
+      }
+      
+      const mp4Match = apiDataStr.match(/"(https?:\/\/[^"]+\.mp4[^"]*)"/);
+      if (mp4Match && mp4Match[1]) {
+        return mp4Match[1];
+      }
+      
+      console.error('No video URL found in API response');
+      return null;
+    } catch (error) {
+      console.error(`Error extracting video URL from API response: ${error.message}`);
+      return null;
+    }
+  }
+
+  /**
    * Get movie by TMDB ID
    * @param {*} req - Express request object
    * @param {*} res - Express response object
@@ -752,32 +958,9 @@ class MovieBoxController {
       const movie = searchResults[0];
       console.log(`Found movie: "${movie.title}" (Rating: ${movie.rating})`);
       
-      // Now we need to click on the result and get the video URL
+      // Now we need to extract the subjectId
       browser = await this.getBrowser();
       page = await browser.newPage();
-      
-      // Set up request interception but allow more resources
-      await page.setRequestInterception(true);
-      page.on('request', (request) => {
-        const resourceType = request.resourceType();
-        const url = request.url();
-        
-        // Allow resources that might be related to video player
-        if (resourceType === 'media' || 
-            url.includes('.mp4') || 
-            url.includes('.m3u8') || 
-            url.includes('playlist') || 
-            url.includes('player')) {
-          console.log(`Allowing resource: ${url}`);
-          request.continue();
-        } 
-        // Block less important resources
-        else if (['image', 'font'].includes(resourceType)) {
-          request.abort();
-        } else {
-          request.continue();
-        }
-      });
       
       await this.applyEnhancedPageHeaders(page);
       await page.setDefaultNavigationTimeout(45000);
@@ -790,41 +973,25 @@ class MovieBoxController {
       // Wait for search results to load
       await page.waitForSelector('.pc-card', { timeout: 20000 });
       
-      // Click on the movie card
-      const cardSelector = '.pc-card';
-      const cards = await page.$$(cardSelector);
+      // Extract the subject ID
+      const subjectId = await this.extractSubjectId(page, movie.cardIndex);
       
-      if (cards.length <= movie.cardIndex) {
-        throw new Error(`Card at index ${movie.cardIndex} not found, only ${cards.length} cards available`);
+      if (!subjectId) {
+        throw new Error('Failed to extract subject ID for movie');
       }
       
-      // Get actual card title to confirm selection
-      const cardTitle = await page.evaluate(el => {
-        const titleEl = el.querySelector('.pc-card-title');
-        return titleEl ? titleEl.textContent.trim() : 'Unknown';
-      }, cards[movie.cardIndex]);
+      // Close the page as we don't need it anymore
+      await page.close();
       
-      console.log(`Clicking on movie card: "${cardTitle}" (index ${movie.cardIndex})`);
+      // Get data directly from the API
+      const apiData = await this.getDirectApiData(subjectId);
       
-      // Click on the "Watch now" button for this card
-      const watchButton = await cards[movie.cardIndex].$('.pc-card-btn');
-      if (!watchButton) {
-        throw new Error('Watch button not found');
+      // Extract video URL from API response
+      const videoUrl = this.extractVideoUrlFromApiResponse(apiData);
+      
+      if (!videoUrl) {
+        throw new Error('Failed to extract video URL from API response');
       }
-      
-      await watchButton.click();
-      
-      // Wait for navigation to complete
-      console.log('Waiting for navigation after card click...');
-      await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 45000 });
-      
-      console.log(`Navigated to movie page: ${page.url()}`);
-      
-      // Wait a bit for page to initialize
-      await delay(2000); // Using our custom delay function
-      
-      // Get video URL with our enhanced method
-      const videoUrl = await this.getVideoUrl(page);
       
       // Upload to Bunny Stream in the background
       bunnyStreamController.uploadVideoToCollection(videoUrl, {
@@ -834,15 +1001,14 @@ class MovieBoxController {
         year: movieDetails.release_date ? new Date(movieDetails.release_date).getFullYear() : null
       });
       
-      await page.close();
-      
       // Cache the successful response
       const responseData = {
         success: true,
         title: movie.title,
         poster: movie.image,
         rating: movie.rating,
-        player_url: videoUrl
+        player_url: videoUrl,
+        api_data: apiData // Include the API data for debugging or additional info
       };
       
       movieboxCache.set(cacheKey, responseData, 7200); // Cache for 2 hours
@@ -853,33 +1019,17 @@ class MovieBoxController {
       if (page) {
         try {
           const url = await page.url();
-          const title = await page.title();
-          const content = await page.content();
-          
           console.error(`Current URL: ${url}`);
-          console.error(`Page title: ${title}`);
-          console.error(`Page content sample: ${content.substring(0, 500)}...`);
-          
-          // Take a screenshot for debugging
-          const timestamp = new Date().getTime();
-          const screenshotPath = `./moviebox-error-${timestamp}.png`;
-          await page.screenshot({ path: screenshotPath, fullPage: true });
-          console.error(`Error screenshot saved to: ${screenshotPath}`);
-          
           await page.close().catch(() => {});
         } catch (contentError) {
-          console.error(`Could not capture page details: ${contentError.message}`);
+          console.error(`Could not capture page URL: ${contentError.message}`);
         }
       }
       
       return res.status(500).json({
         success: false,
         message: 'Failed to get movie from MovieBox',
-        error: error.message,
-        error_details: {
-          stack: error.stack.split('\n')[0],
-          timestamp: new Date().toISOString()
-        }
+        error: error.message
       });
     }
   }
@@ -946,31 +1096,9 @@ class MovieBoxController {
       const show = searchResults[0];
       console.log(`Found TV show: "${show.title}" (Rating: ${show.rating})`);
       
-      // Now we need to click on the result, select season and episode, and get the video URL
+      // Now we need to extract the subjectId
       browser = await this.getBrowser();
       page = await browser.newPage();
-      
-      // Set up request interception for better performance
-      await page.setRequestInterception(true);
-      page.on('request', (request) => {
-        const resourceType = request.resourceType();
-        const url = request.url();
-        
-        // Allow resources that might be related to video player
-        if (resourceType === 'media' || 
-            url.includes('.mp4') || 
-            url.includes('.m3u8') || 
-            url.includes('playlist') || 
-            url.includes('player')) {
-          request.continue();
-        } 
-        // Block less important resources
-        else if (['image', 'font'].includes(resourceType)) {
-          request.abort();
-        } else {
-          request.continue();
-        }
-      });
       
       await this.applyEnhancedPageHeaders(page);
       await page.setDefaultNavigationTimeout(45000);
@@ -983,127 +1111,25 @@ class MovieBoxController {
       // Wait for search results to load
       await page.waitForSelector('.pc-card', { timeout: 20000 });
       
-      // Click on the show card
-      const cardSelector = '.pc-card';
-      const cards = await page.$$(cardSelector);
+      // Extract the subject ID
+      const subjectId = await this.extractSubjectId(page, show.cardIndex);
       
-      if (cards.length <= show.cardIndex) {
-        throw new Error(`Card at index ${show.cardIndex} not found, only ${cards.length} cards available`);
+      if (!subjectId) {
+        throw new Error('Failed to extract subject ID for TV show');
       }
       
-      // Get actual card title to confirm selection
-      const cardTitle = await page.evaluate(el => {
-        const titleEl = el.querySelector('.pc-card-title');
-        return titleEl ? titleEl.textContent.trim() : 'Unknown';
-      }, cards[show.cardIndex]);
+      // Close the page as we don't need it anymore
+      await page.close();
       
-      console.log(`Clicking on TV show card: "${cardTitle}" (index ${show.cardIndex})`);
+      // Get data directly from the API with season and episode parameters
+      const apiData = await this.getDirectApiData(subjectId, season, episode);
       
-      // Click on the "Watch now" button for this card
-      const watchButton = await cards[show.cardIndex].$('.pc-card-btn');
-      if (!watchButton) {
-        throw new Error('Watch button not found');
+      // Extract video URL from API response
+      const videoUrl = this.extractVideoUrlFromApiResponse(apiData);
+      
+      if (!videoUrl) {
+        throw new Error('Failed to extract video URL from API response');
       }
-      
-      await watchButton.click();
-      
-      // Wait for navigation to complete
-      console.log('Waiting for navigation after card click...');
-      await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 45000 });
-      
-      console.log(`Navigated to TV show page: ${page.url()}`);
-      
-      // Wait a bit for page to initialize
-      await delay(2000); // Using our custom delay function
-      
-      // Find and click on the season
-      try {
-        // Try to find the season element
-        console.log(`Looking for season ${season} selector...`);
-        await page.waitForSelector('.pc-se-box', { timeout: 15000 });
-        
-        // Check if season elements exist
-        const seasonElements = await page.$$('.pc-se');
-        
-        if (seasonElements.length === 0) {
-          throw new Error('No seasons found on page');
-        }
-        
-        console.log(`Found ${seasonElements.length} seasons. Looking for S${season.toString().padStart(2, '0')}`);
-        
-        // Find correct season
-        let foundSeasonElement = false;
-        for (let i = 0; i < seasonElements.length; i++) {
-          const seasonText = await page.evaluate(el => el.textContent.trim(), seasonElements[i]);
-          console.log(`Season ${i+1} text: "${seasonText}"`);
-          
-          if (seasonText === `S${season.toString().padStart(2, '0')}`) {
-            console.log(`Clicking on season ${season}`);
-            await seasonElements[i].click();
-            foundSeasonElement = true;
-            break;
-          }
-        }
-        
-        if (!foundSeasonElement) {
-          throw new Error(`Season ${season} not found on page`);
-        }
-        
-      } catch (seasonError) {
-        console.error(`Error selecting season: ${seasonError.message}`);
-        throw new Error(`Failed to select season ${season}: ${seasonError.message}`);
-      }
-      
-      // Wait a moment for the episodes to update
-      await delay(2000); // Using our custom delay function
-      
-      // Find and click on the episode
-      try {
-        // Wait for the episode container
-        console.log(`Looking for episode ${episode} selector...`);
-        await page.waitForSelector('.pc-ep-contain', { timeout: 15000 });
-        
-        // Check if episode elements exist
-        const episodeElements = await page.$$('.pc-ep');
-        
-        if (episodeElements.length === 0) {
-          throw new Error('No episodes found on page');
-        }
-        
-        console.log(`Found ${episodeElements.length} episodes. Looking for episode ${episode.toString().padStart(2, '0')}`);
-        
-        // Find correct episode
-        let foundEpisodeElement = false;
-        for (let i = 0; i < episodeElements.length; i++) {
-          const episodeText = await page.evaluate(el => {
-            const span = el.querySelector('span');
-            return span ? span.textContent.trim() : '';
-          }, episodeElements[i]);
-          
-          console.log(`Episode ${i+1} text: "${episodeText}"`);
-          
-          if (episodeText === episode.toString().padStart(2, '0')) {
-            console.log(`Clicking on episode ${episode}`);
-            await episodeElements[i].click();
-            foundEpisodeElement = true;
-            break;
-          }
-        }
-        
-        if (!foundEpisodeElement) {
-          throw new Error(`Episode ${episode} not found on page`);
-        }
-        
-      } catch (episodeError) {
-        console.error(`Error selecting episode: ${episodeError.message}`);
-        throw new Error(`Failed to select episode ${episode}: ${episodeError.message}`);
-      }
-      
-      // Wait for video player to load after selecting episode
-      await delay(3000); // Using our custom delay function
-      
-      // Get video URL
-      const videoUrl = await this.getVideoUrl(page);
       
       // Upload to Bunny Stream in the background
       bunnyStreamController.uploadVideoToCollection(videoUrl, {
@@ -1114,15 +1140,14 @@ class MovieBoxController {
         episode: episode
       });
       
-      await page.close();
-      
       // Cache the successful response
       const responseData = {
         success: true,
         title: `${show.title} - S${season}E${episode}`,
         poster: show.image,
         rating: show.rating,
-        player_url: videoUrl
+        player_url: videoUrl,
+        api_data: apiData // Include the API data for debugging or additional info
       };
       
       movieboxCache.set(cacheKey, responseData, 7200); // Cache for 2 hours
@@ -1133,22 +1158,10 @@ class MovieBoxController {
       if (page) {
         try {
           const url = await page.url();
-          const title = await page.title();
-          const content = await page.content();
-          
           console.error(`Current URL: ${url}`);
-          console.error(`Page title: ${title}`);
-          console.error(`Page content sample: ${content.substring(0, 500)}...`);
-          
-          // Take a screenshot for debugging
-          const timestamp = new Date().getTime();
-          const screenshotPath = `./moviebox-tv-error-${timestamp}.png`;
-          await page.screenshot({ path: screenshotPath, fullPage: true });
-          console.error(`Error screenshot saved to: ${screenshotPath}`);
-          
           await page.close().catch(() => {});
         } catch (contentError) {
-          console.error(`Could not capture page details: ${contentError.message}`);
+          console.error(`Could not capture page URL: ${contentError.message}`);
         }
       }
       

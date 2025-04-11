@@ -97,6 +97,7 @@ router.get('/bunny/collections/:id/videos', async (req, res) => {
   }
 });
 
+// New OpenSubtitles API routes
 router.get('/subtitles/search', subtitleController.searchSubtitles);
 router.get('/subtitles/download', subtitleController.downloadSubtitle);
 
@@ -128,6 +129,7 @@ router.post('/subtitles/clear-cache', async (req, res) => {
   }
 });
 
+// MovieBox routes
 router.get('/moviebox/movie/:tmdbId', movieboxController.getMovieByTmdbId.bind(movieboxController));
 router.get('/moviebox/tv/:tmdbId', movieboxController.getTvEpisodeByTmdbId.bind(movieboxController));
 

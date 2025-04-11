@@ -25,11 +25,11 @@ class MovieBoxController {
     this.tmdbApiKey = process.env.API_TOKEN;
     this.tmdbApiBaseUrl = 'https://api.themoviedb.org/3';
     
-    // Enhanced headers to appear as a regular browser
+    // Initialize headers
     this.headers = {
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
       'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-      'Accept-Language': 'en-US,en;q=0.9,ar;q=0.8',
+      'Accept-Language': 'en-US,en;q=0.9',
       'Accept-Encoding': 'gzip, deflate, br',
       'Referer': 'https://www.google.com/',
       'Origin': 'https://www.google.com',
@@ -50,6 +50,9 @@ class MovieBoxController {
     
     // Setup header rotation interval
     setInterval(this.rotateUserAgent.bind(this), 600000); // Rotate user agent every 10 minutes
+    
+    // Setup tab management interval
+    setInterval(this.manageBrowserTabs.bind(this), 30000); // Check every 30 seconds
   }
   
   /**
@@ -76,9 +79,9 @@ class MovieBoxController {
    */
   async getBrowser() {
     if (!browserInstance) {
-      console.log('Creating new browser instance for MovieBox');
+      console.log('Creating new browser instance for MovieBox in visible mode');
       browserInstance = await puppeteerExtra.launch({
-        headless: "new",  // Use new headless mode
+        headless: false,  // Changed from "new" to false to make browser visible
         defaultViewport: {
           width: 1366,
           height: 768
@@ -90,12 +93,13 @@ class MovieBoxController {
           '--disable-features=IsolateOrigins,site-per-process',
           '--disable-dev-shm-usage',
           '--js-flags=--expose-gc',
-          '--disable-gpu',
           '--window-size=1366,768',
           '--disable-notifications',
           '--disable-infobars'
         ],
-        ignoreDefaultArgs: ['--enable-automation'] // Hide automation
+        ignoreDefaultArgs: ['--enable-automation'], // Hide automation
+        // Add slowMo to slow down operations for better visibility
+        slowMo: 50 // Slows down Puppeteer operations by 50ms
       });
     }
     
@@ -108,9 +112,11 @@ class MovieBoxController {
    */
   async cleanupBrowser() {
     if (browserInstance && Date.now() - browserLastUsed > BROWSER_IDLE_TIMEOUT) {
-      console.log('Closing idle browser instance');
-      await browserInstance.close();
-      browserInstance = null;
+      console.log('Browser has been idle for too long. Would normally close it, but keeping it open for debugging.');
+      // In debug mode, don't close the browser automatically
+      // Uncomment the next lines to restore automatic closing:
+      // await browserInstance.close();
+      // browserInstance = null;
     }
   }
 
@@ -196,77 +202,133 @@ class MovieBoxController {
     let browser, page;
     try {
       browser = await this.getBrowser();
+      
+      // Close existing pages to avoid having too many tabs
+      const pages = await browser.pages();
+      for (const existingPage of pages) {
+        if (pages.length > 1) { // Keep at least one page
+          try {
+            const url = await existingPage.url();
+            if (url !== 'about:blank') { // Don't close blank pages
+              console.log(`Closing existing page: ${url}`);
+              await existingPage.close().catch(() => {});
+            }
+          } catch (e) {}
+        }
+      }
+      
+      // Create new page
       page = await browser.newPage();
       
-      // Optimize page for speed
-      await page.setRequestInterception(true);
-      page.on('request', (request) => {
-        // Block unnecessary resources
-        const resourceType = request.resourceType();
-        if (['image', 'font'].includes(resourceType)) {
-          request.abort();
-        } else {
-          request.continue();
-        }
+      // Set viewport size
+      await page.setViewport({
+        width: 1366,
+        height: 768
       });
       
       // Apply enhanced headers for better anonymity
       await this.applyEnhancedPageHeaders(page);
-      await page.setDefaultNavigationTimeout(30000);
+      await page.setDefaultNavigationTimeout(60000); // Longer timeout
+      
+      // Add debugging info on the page
+      await page.evaluateOnNewDocument(() => {
+        window.onerror = (message, source, lineno, colno, error) => {
+          console.error('Page Error:', message, 'Source:', source, 'Line:', lineno);
+        };
+      });
       
       console.log(`Navigating to: ${searchUrl}`);
       
-      // Navigate to search page with faster load strategy
+      // Navigate directly to search page with better wait strategy
       const response = await page.goto(searchUrl, { 
-        waitUntil: 'domcontentloaded', 
-        timeout: 30000 
+        waitUntil: 'networkidle2', 
+        timeout: 60000 
       });
+      
+      if (!response) {
+        throw new Error('No response received from search page');
+      }
       
       if (!response.ok()) {
         const status = response.status();
         throw new Error(`Search page returned status ${status} (${response.statusText()})`);
       }
       
-      // Wait for content to load
-      await page.waitForSelector('.pc-card', { timeout: 10000 }).catch(() => {
-        console.log('Search results selector not found, page might be empty');
-      });
+      console.log('Page loaded, URL:', page.url());
       
-      // Extract search results
+      // Wait for content to load
+      try {
+        await page.waitForSelector('.pc-card', { timeout: 20000 });
+        console.log('Cards found on page');
+      } catch (err) {
+        console.log('Search results selector not found, taking a screenshot and getting page content');
+        const timestamp = new Date().getTime();
+        const screenshotPath = `./search-error-${timestamp}.png`;
+        await page.screenshot({ path: screenshotPath, fullPage: true });
+        console.log(`Screenshot saved to: ${screenshotPath}`);
+        
+        const pageHtml = await page.content();
+        console.log('Page HTML sample:', pageHtml.substring(0, 500));
+        
+        // Clean up
+        await page.close().catch(() => {});
+        return []; // Return empty results if no cards found
+      }
+      
+      // Extract search results with better error handling
       const searchResults = await page.evaluate(() => {
+        console.log('Evaluating page for search results');
         const shows = [];
         const cards = document.querySelectorAll('.pc-card');
         
+        console.log(`Found ${cards.length} cards`);
+        
         if (cards.length === 0) {
-          // Log detailed page structure for debugging if no results found
           console.log('No cards found on page');
           return shows;
         }
         
-        cards.forEach(card => {
-          const titleElement = card.querySelector('.pc-card-title');
-          const buttonElement = card.querySelector('.pc-card-btn');
-          const ratingElement = card.querySelector('.pc-rate');
-          const imageElement = card.querySelector('img.banner');
-          
-          if (titleElement && buttonElement) {
-            const title = titleElement.textContent.trim();
-            // Store card index for clicking later
-            const cardIndex = Array.from(document.querySelectorAll('.pc-card')).indexOf(card);
-            const rating = ratingElement ? parseFloat(ratingElement.textContent.trim()) : 0;
-            const image = imageElement ? imageElement.src : '';
+        cards.forEach((card, index) => {
+          try {
+            const titleElement = card.querySelector('.pc-card-title');
+            const buttonElement = card.querySelector('.pc-card-btn');
+            const ratingElement = card.querySelector('.pc-rate');
+            const imageElement = card.querySelector('img.banner');
             
-            shows.push({
-              title,
-              cardIndex, // We'll use this to click on the correct card
-              rating,
-              image
-            });
+            if (titleElement && buttonElement) {
+              const title = titleElement.textContent.trim();
+              // Store card index for clicking later
+              const cardIndex = index;
+              const rating = ratingElement ? parseFloat(ratingElement.textContent.trim()) : 0;
+              const image = imageElement ? imageElement.src : '';
+              
+              shows.push({
+                title,
+                cardIndex,
+                rating,
+                image
+              });
+              
+              console.log(`Added show: ${title}`);
+            }
+          } catch (err) {
+            console.error(`Error processing card ${index}:`, err);
           }
         });
         
         return shows;
       });
+      
+      console.log(`Found ${searchResults.length} search results`);
+      
+      // Take a screenshot of the search results
+      const timestamp = new Date().getTime();
+      const screenshotPath = `./search-results-${timestamp}.png`;
+      await page.screenshot({ path: screenshotPath, fullPage: true });
+      console.log(`Search results screenshot saved to: ${screenshotPath}`);
+      
+      // Close the page when we're done with it
+      await page.close().catch(() => {});
       
       // Add caching of results before returning
       movieboxCache.set(cacheKey, searchResults, 21600); // Cache for 6 hours
@@ -276,13 +338,22 @@ class MovieBoxController {
       
       if (page) {
         try {
+          const url = await page.url();
+          console.error(`Current page URL: ${url}`);
           const content = await page.content();
           console.error(`Page content sample: ${content.substring(0, 500)}...`);
+          
+          // Take a screenshot for debugging
+          const timestamp = new Date().getTime();
+          const errorScreenPath = `./search-error-${timestamp}.png`;
+          await page.screenshot({ path: errorScreenPath, fullPage: true });
+          console.error(`Error screenshot saved to: ${errorScreenPath}`);
+          
         } catch (contentError) {
-          console.error(`Could not capture page content: ${contentError.message}`);
+          console.error(`Could not capture page details: ${contentError.message}`);
+        } finally {
+          await page.close().catch(() => {});
         }
-        
-        await page.close().catch(() => {});
       }
       
       throw error;
@@ -716,6 +787,9 @@ class MovieBoxController {
     try {
       console.log(`Attempting to extract subject ID from card at index ${cardIndex}`);
       
+      // Use a longer delay for better visibility in non-headless mode
+      await delay(1000); // Added delay for visibility
+      
       // First try to extract from network requests
       const subjectIdFromRequests = await page.evaluate(() => {
         if (window.performance && window.performance.getEntries) {
@@ -749,25 +823,17 @@ class MovieBoxController {
       
       console.log(`Clicking on card: "${cardTitle}" (index ${cardIndex})`);
       
-      // Enable request interception to capture API requests
-      await page.setRequestInterception(true);
+      // Highlight the card before clicking (for better visibility)
+      await page.evaluate((index) => {
+        const cards = document.querySelectorAll('.pc-card');
+        if (cards[index]) {
+          cards[index].style.border = '3px solid red';
+          cards[index].style.boxShadow = '0 0 10px rgba(255, 0, 0, 0.7)';
+        }
+      }, cardIndex);
       
-      const subjectIdPromise = new Promise((resolve) => {
-        page.on('request', request => {
-          const url = request.url();
-          if (url.includes('/subject/detail?subjectId=')) {
-            const match = url.match(/subjectId=([0-9]+)/);
-            if (match && match[1]) {
-              console.log(`Captured subject ID from request: ${match[1]}`);
-              resolve(match[1]);
-            }
-          }
-          request.continue();
-        });
-        
-        // Set a timeout to avoid hanging
-        setTimeout(() => resolve(null), 10000);
-      });
+      // Wait to see the highlighted card
+      await delay(2000); // Added delay for visibility
       
       // Click on the "Watch now" button for this card
       const watchButton = await cards[cardIndex].$('.pc-card-btn');
@@ -775,27 +841,42 @@ class MovieBoxController {
         throw new Error('Watch button not found');
       }
       
+      // Highlight the button before clicking
+      await page.evaluate((cardIndex) => {
+        const cards = document.querySelectorAll('.pc-card');
+        const button = cards[cardIndex].querySelector('.pc-card-btn');
+        if (button) {
+          button.style.backgroundColor = 'red';
+          button.style.color = 'white';
+        }
+      }, cardIndex);
+      
+      // Wait to see the highlighted button
+      await delay(1000); // Added delay for visibility
+      
       await watchButton.click();
+      console.log('Watch button clicked, waiting for navigation...');
       
-      // Wait for navigation or subject ID capture
-      const subjectId = await subjectIdPromise;
-      if (subjectId) {
-        return subjectId;
-      }
+      // Wait for navigation to complete
+      await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 60000 });
+      console.log(`Navigated to: ${page.url()}`);
       
-      // If we're here, we need to check the current URL
-      const url = page.url();
-      console.log(`Current page URL: ${url}`);
+      // Pause to observe the page
+      await delay(3000); // Added delay for visibility
       
       // Check for detail URL pattern
+      const url = page.url();
       const subjectIdMatch = url.match(/\/detail\?subjectId=([0-9]+)/);
       if (subjectIdMatch && subjectIdMatch[1]) {
         console.log(`Extracted subject ID from URL: ${subjectIdMatch[1]}`);
         return subjectIdMatch[1];
       }
       
-      // Last resort: look for any subject ID on the page
-      const pageSubjectId = await page.evaluate(() => {
+      // Try to find subject ID from API calls
+      const subjectId = await page.evaluate(() => {
+        // Log all performance entries for debugging
+        console.log('Network entries:', window.performance.getEntries().map(e => e.name).join('\n'));
+        
         // Check for API calls in the network log
         if (window.performance && window.performance.getEntries) {
           const entries = window.performance.getEntries();
@@ -810,23 +891,33 @@ class MovieBoxController {
           }
         }
         
-        // Look for any data attributes on the page
+        // Look for data attributes on the page
+        document.querySelectorAll('[data-id]').forEach(el => {
+          console.log('Found element with data-id:', el.dataset.id);
+        });
+        
+        // Check for any element with subjectId in attributes
+        const elements = document.querySelectorAll('*');
+        for (const el of elements) {
+          for (const attr of el.attributes) {
+            if (attr.value && attr.value.includes('subjectId')) {
+              console.log('Found attribute with subjectId:', attr.name, attr.value);
+            }
+          }
+        }
+        
+        // Return any ID found in data attributes
         const dataElements = document.querySelectorAll('[data-id]');
         for (const el of dataElements) {
           if (el.dataset.id) return el.dataset.id;
         }
         
-        // Look for IDs in page text content
-        const pageText = document.body.innerText;
-        const idMatch = pageText.match(/ID:\s*(\d+)/i);
-        if (idMatch && idMatch[1]) return idMatch[1];
-        
         return null;
       });
       
-      if (pageSubjectId) {
-        console.log(`Found subject ID from page evaluation: ${pageSubjectId}`);
-        return pageSubjectId;
+      if (subjectId) {
+        console.log(`Found subject ID from page evaluation: ${subjectId}`);
+        return subjectId;
       }
       
       console.error('Failed to extract subject ID using all methods');
@@ -1159,6 +1250,13 @@ class MovieBoxController {
         try {
           const url = await page.url();
           console.error(`Current URL: ${url}`);
+          
+          // Take a final error screenshot
+          const timestamp = new Date().getTime();
+          const finalErrorPath = `./final-error-${error.message.replace(/[^a-z0-9]/gi, '-')}-${timestamp}.png`;
+          await page.screenshot({ path: finalErrorPath, fullPage: true });
+          console.error(`Final error screenshot saved to: ${finalErrorPath}`);
+          
           await page.close().catch(() => {});
         } catch (contentError) {
           console.error(`Could not capture page URL: ${contentError.message}`);
@@ -1185,14 +1283,34 @@ class MovieBoxController {
    * @param {Object} page - Puppeteer page
    */
   async applyEnhancedPageHeaders(page) {
-    await page.setUserAgent(this.headers['User-Agent']);
-    await page.setExtraHTTPHeaders(this.headers);
+    console.log('Setting page headers and user agent');
+    
+    // Make sure this.headers exists
+    if (!this.headers) {
+      console.error('Headers object is undefined, initializing now');
+      this.headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Referer': 'https://www.google.com/'
+      };
+    }
+    
+    // Set user agent directly
+    await page.setUserAgent(this.headers['User-Agent'] || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36');
+    
+    // Set remaining headers
+    const headersToSet = { ...this.headers };
+    delete headersToSet['User-Agent']; // Already set via setUserAgent
+    await page.setExtraHTTPHeaders(headersToSet);
     
     // Set Google as the referrer
     await page.evaluateOnNewDocument(() => {
       Object.defineProperty(document, 'referrer', { get: () => 'https://www.google.com/' });
       Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
     });
+    
+    console.log('Headers and user agent set successfully');
   }
 
   /**
@@ -1417,6 +1535,16 @@ class MovieBoxController {
       const season = parseInt(req.query.season, 10);
       const episode = parseInt(req.query.episode, 10);
       
+      // Define the cache key properly at the function scope level
+      const cacheKey = `moviebox_tv_subtitle_${tmdbId}_s${season}_e${episode}`;
+      
+      // Check cache first
+      const cachedResponse = movieboxCache.get(cacheKey);
+      if (cachedResponse) {
+        console.log(`Using cached TV episode subtitles for TMDB ID ${tmdbId}, S${season}E${episode}`);
+        return res.json(cachedResponse);
+      }
+      
       if (isNaN(season) || isNaN(episode)) {
         return res.status(400).json({
           success: false,
@@ -1458,7 +1586,7 @@ class MovieBoxController {
       const show = searchResults[0];
       console.log(`Found TV show: "${show.title}" (Rating: ${show.rating})`);
       
-      // Now we need to click on the result, select season and episode, and capture subtitle URL
+      // Reuse existing browser instance and create a new page
       browser = await this.getBrowser();
       page = await browser.newPage();
       
@@ -1523,145 +1651,98 @@ class MovieBoxController {
       
       console.log(`Navigated to TV show page: ${page.url()}`);
       
-      // Wait longer for page to initialize
-      await delay(5000); // Increased delay to allow page to fully load
+      // Wait longer for page to initialize with visible indication
+      console.log('Waiting for page to initialize...');
+      await delay(5000); // Increased delay for visibility
       
-      // Try to find season selectors using multiple approaches
-      try {
-        console.log(`Looking for season ${season} selector...`);
-        
-        // Take a screenshot to debug the page structure
-        const timestamp = new Date().getTime();
-        const debugScreenshotPath = `./debug-seasons-${tmdbId}-${timestamp}.png`;
-        await page.screenshot({ path: debugScreenshotPath, fullPage: true });
-        console.log(`Debug screenshot saved to: ${debugScreenshotPath}`);
-        
-        // Attempt to check page structure to see if it's a different layout
-        const pageStructure = await page.evaluate(() => {
-          return {
-            hasSeasonBox: !!document.querySelector('.pc-se-box'),
-            hasSeasonElement: !!document.querySelector('.pc-se'),
-            hasEpisodeContainer: !!document.querySelector('.pc-ep-contain'),
-            hasEpisodeElement: !!document.querySelector('.pc-ep'),
-            visibleElements: Array.from(document.querySelectorAll('div[class^="pc-"]')).map(el => el.className),
-            bodyHTML: document.body.innerHTML.substring(0, 1000) // First 1000 chars of HTML for debugging
-          };
-        });
-        
-        console.log('Page structure diagnosis:', JSON.stringify(pageStructure, null, 2));
-        
-        // Check if the show might have only one season (no season selection needed)
-        const hasEpisodeContainerDirectly = await page.$('.pc-ep-contain');
-        
-        if (hasEpisodeContainerDirectly) {
-          console.log('Show appears to have only one season, episodes directly visible');
-          // Skip season selection and proceed directly to episode selection
-        } else {
-          // Try multiple selectors for season container
-          const seasonSelectors = ['.pc-se-box', '.seasonsList', '.seasons-container', '[class*="season"]'];
-          let seasonContainer = null;
-          
-          for (const selector of seasonSelectors) {
-            console.log(`Trying season container selector: ${selector}`);
-            try {
-              // Increased timeout for waiting for season selector
-              seasonContainer = await page.waitForSelector(selector, { timeout: 30000 }).catch(() => null);
-              if (seasonContainer) {
-                console.log(`Found season container with selector: ${selector}`);
-                break;
-              }
-            } catch (err) {
-              console.log(`Selector ${selector} not found`);
-            }
-          }
-          
-          if (!seasonContainer) {
-            throw new Error('No season container found on page, check the debug screenshot for page structure');
-          }
-          
-          // Try to find season elements with multiple selectors
-          const seasonElementSelectors = ['.pc-se', '.season-item', '[class*="season"]'];
-          let seasonElements = [];
-          
-          for (const selector of seasonElementSelectors) {
-            console.log(`Trying season element selector: ${selector}`);
-            const elements = await page.$$(selector);
-            if (elements.length > 0) {
-              console.log(`Found ${elements.length} season elements with selector: ${selector}`);
-              seasonElements = elements;
-              break;
-            }
-          }
-          
-          if (seasonElements.length === 0) {
-            throw new Error('No season elements found on page');
-          }
-          
-          console.log(`Found ${seasonElements.length} seasons. Looking for S${season.toString().padStart(2, '0')}`);
-          
-          // Find correct season with more flexible matching
-          let foundSeasonElement = false;
-          for (let i = 0; i < seasonElements.length; i++) {
-            const seasonText = await page.evaluate(el => el.textContent.trim(), seasonElements[i]);
-            console.log(`Season ${i+1} text: "${seasonText}"`);
-            
-            // More flexible matching for season number
-            const seasonMatches = [
-              `S${season.toString().padStart(2, '0')}`,    // S01
-              `Season ${season}`,                          // Season 1
-              `Season ${season.toString().padStart(2, '0')}`, // Season 01
-              `${season}`,                                 // 1
-              `الموسم ${season}`                           // Arabic "Season 1"
-            ];
-            
-            if (seasonMatches.some(match => seasonText.includes(match))) {
-              console.log(`Clicking on season ${season} (matched text: "${seasonText}")`);
-              await seasonElements[i].click();
-              foundSeasonElement = true;
-              break;
-            }
-          }
-          
-          if (!foundSeasonElement) {
-            // If no exact match, try clicking on the first season element if we're looking for season 1
-            if (season === 1 && seasonElements.length > 0) {
-              console.log('No exact match for Season 1, trying first season element');
-              await seasonElements[0].click();
-              foundSeasonElement = true;
-            } else {
-              throw new Error(`Season ${season} not found on page`);
-            }
-          }
-        }
-        
-      } catch (seasonError) {
-        console.error(`Error selecting season: ${seasonError.message}`);
-        
-        // Take a screenshot of the error state
-        const timestamp = new Date().getTime();
-        const errorScreenshotPath = `./error-seasons-${tmdbId}-${timestamp}.png`;
-        await page.screenshot({ path: errorScreenshotPath, fullPage: true });
-        console.error(`Error screenshot saved to: ${errorScreenshotPath}`);
-        
-        // Dump the HTML content for debugging
-        const htmlContent = await page.content();
-        console.error(`HTML content sample: ${htmlContent.substring(0, 500)}...`);
-        
-        throw new Error(`Failed to select season ${season}: ${seasonError.message}`);
-      }
+      // Add a visual indicator on the page to show what we're looking for
+      await page.evaluate((season, episode) => {
+        // Create a floating div to show what we're looking for
+        const infoDiv = document.createElement('div');
+        infoDiv.style.position = 'fixed';
+        infoDiv.style.top = '10px';
+        infoDiv.style.left = '10px';
+        infoDiv.style.backgroundColor = 'rgba(0, 0, 255, 0.8)';
+        infoDiv.style.color = 'white';
+        infoDiv.style.padding = '10px';
+        infoDiv.style.borderRadius = '5px';
+        infoDiv.style.zIndex = '9999';
+        infoDiv.style.fontSize = '16px';
+        infoDiv.style.fontWeight = 'bold';
+        infoDiv.textContent = `Looking for: Season ${season}, Episode ${episode}`;
+        document.body.appendChild(infoDiv);
+      }, season, episode);
       
       // Wait longer for the episodes to update
       await delay(5000); // Increased delay
       
+      // Take a screenshot to debug the episode structure
+      const timestamp = new Date().getTime();
+      const debugEpScreenshotPath = `./debug-episodes-${tmdbId}-${timestamp}.png`;
+      await page.screenshot({ path: debugEpScreenshotPath, fullPage: true });
+      console.log(`Debug episode screenshot saved to: ${debugEpScreenshotPath}`);
+      
+      // Check for seasons first
+      try {
+        const seasonContainers = await page.$$('.pc-se');
+        if (seasonContainers.length > 0) {
+          console.log(`Found ${seasonContainers.length} seasons, looking for season ${season}`);
+          
+          // Highlight all seasons for visibility
+          await page.evaluate(() => {
+            document.querySelectorAll('.pc-se').forEach((el, i) => {
+              el.style.border = '2px dashed yellow';
+            });
+          });
+          
+          // Find the right season container
+          let seasonFound = false;
+          for (let i = 0; i < seasonContainers.length; i++) {
+            const seasonText = await page.evaluate(el => el.textContent.trim(), seasonContainers[i]);
+            console.log(`Season ${i+1} text: "${seasonText}"`);
+            
+            if (seasonText === `S${season.toString().padStart(2, '0')}` || 
+                seasonText === `Season ${season}` || 
+                seasonText === `${season}`) {
+              // Highlight selected season
+              await page.evaluate((idx) => {
+                const seasons = document.querySelectorAll('.pc-se');
+                if (seasons[idx]) {
+                  seasons[idx].style.border = '3px solid green';
+                  seasons[idx].style.backgroundColor = 'rgba(0,255,0,0.3)';
+                }
+              }, i);
+              
+              await delay(1000); // Show highlighting before clicking
+              await seasonContainers[i].click();
+              console.log(`Clicked on season ${season}`);
+              seasonFound = true;
+              break;
+            }
+          }
+          
+          if (!seasonFound && seasonContainers.length > 0) {
+            // If not found but there are seasons, click on the first one if we're looking for season 1
+            if (season === 1) {
+              await seasonContainers[0].click();
+              console.log(`Season ${season} not found explicitly, clicked on first season`);
+            } else {
+              throw new Error(`Season ${season} not found in season selectors`);
+            }
+          }
+          
+          // Wait for episodes to update after selecting season
+          await delay(3000);
+        } else {
+          console.log('No season containers found, assuming season 1 or direct episode list');
+        }
+      } catch (error) {
+        console.warn(`Could not select season: ${error.message}. Will try to find episodes directly.`);
+      }
+      
       // Find and click on the episode with more flexible selectors
       try {
         console.log(`Looking for episode ${episode} selector...`);
-        
-        // Take a screenshot to debug the episode structure
-        const timestamp = new Date().getTime();
-        const debugEpScreenshotPath = `./debug-episodes-${tmdbId}-${timestamp}.png`;
-        await page.screenshot({ path: debugEpScreenshotPath, fullPage: true });
-        console.log(`Debug episode screenshot saved to: ${debugEpScreenshotPath}`);
         
         // Try multiple selectors for episode container
         const episodeContainerSelectors = ['.pc-ep-contain', '.episodes-container', '.episodesList', '[class*="episode"]'];
@@ -1670,7 +1751,7 @@ class MovieBoxController {
         for (const selector of episodeContainerSelectors) {
           console.log(`Trying episode container selector: ${selector}`);
           try {
-            episodeContainer = await page.waitForSelector(selector, { timeout: 30000 }).catch(() => null);
+            episodeContainer = await page.waitForSelector(selector, { timeout: 10000 }).catch(() => null);
             if (episodeContainer) {
               console.log(`Found episode container with selector: ${selector}`);
               break;
@@ -1704,6 +1785,13 @@ class MovieBoxController {
         
         console.log(`Found ${episodeElements.length} episodes. Looking for episode ${episode.toString().padStart(2, '0')}`);
         
+        // Highlight all episodes for visibility
+        await page.evaluate((selector) => {
+          document.querySelectorAll(selector).forEach((el) => {
+            el.style.border = '2px dashed yellow';
+          });
+        }, episodeElements.length > 0 ? episodeElementSelectors[0] : '.pc-ep');
+        
         // Find correct episode with more flexible matching
         let foundEpisodeElement = false;
         for (let i = 0; i < episodeElements.length; i++) {
@@ -1726,6 +1814,17 @@ class MovieBoxController {
           ];
           
           if (episodeMatches.some(match => episodeText.includes(match))) {
+            // Highlight selected episode
+            await page.evaluate((idx, selector) => {
+              const episodes = document.querySelectorAll(selector);
+              if (episodes[idx]) {
+                episodes[idx].style.border = '3px solid green';
+                episodes[idx].style.backgroundColor = 'rgba(0,255,0,0.3)';
+              }
+            }, i, episodeElements.length > 0 ? episodeElementSelectors[0] : '.pc-ep');
+            
+            await delay(1000); // Show highlighting before clicking
+            
             console.log(`Clicking on episode ${episode} (matched text: "${episodeText}")`);
             await episodeElements[i].click();
             foundEpisodeElement = true;
@@ -1748,7 +1847,6 @@ class MovieBoxController {
         console.error(`Error selecting episode: ${episodeError.message}`);
         
         // Take a screenshot of the error state
-        const timestamp = new Date().getTime();
         const errorScreenshotPath = `./error-episodes-${tmdbId}-${timestamp}.png`;
         await page.screenshot({ path: errorScreenshotPath, fullPage: true });
         console.error(`Error screenshot saved to: ${errorScreenshotPath}`);
@@ -1772,29 +1870,36 @@ class MovieBoxController {
             '[aria-label="Play"]',
             '.player-control-play',
             '.art-video-player .art-control-button',
-            'button.art-control'
+            'button.art-control',
+            'video'  // Try clicking directly on the video element
           ];
           
           for (const selector of playButtonSelectors) {
             const playButton = await page.$(selector);
             if (playButton) {
               console.log(`Found play button (${selector}), clicking it...`);
-              await playButton.click().catch(() => console.log(`Failed to click ${selector}`));
-              playSuccess = true;
-              break;
+              try {
+                await playButton.click();
+                playSuccess = true;
+                break;
+              } catch (clickErr) {
+                console.log(`Failed to click ${selector}: ${clickErr.message}`);
+                // Try using page.evaluate for clicking instead
+                try {
+                  await page.evaluate((sel) => {
+                    const el = document.querySelector(sel);
+                    if (el) el.click();
+                  }, selector);
+                  playSuccess = true;
+                  break;
+                } catch (evalErr) {
+                  console.log(`Failed to click ${selector} via evaluate: ${evalErr.message}`);
+                }
+              }
             }
           }
           
           if (playSuccess) break;
-          
-          // If no button found, try clicking on the video element itself
-          const videoElement = await page.$('video');
-          if (videoElement) {
-            console.log('Clicking directly on video element');
-            await videoElement.click();
-            playSuccess = true;
-            break;
-          }
           
           // Wait before next attempt
           await delay(2000);
@@ -1810,10 +1915,11 @@ class MovieBoxController {
         console.log('No subtitle URL captured');
         
         // Take a screenshot to help debug why subtitles weren't found
-        const timestamp = new Date().getTime();
         const finalScreenshotPath = `./no-subtitles-${tmdbId}-${timestamp}.png`;
         await page.screenshot({ path: finalScreenshotPath, fullPage: true });
         console.log(`Final screenshot saved to: ${finalScreenshotPath}`);
+        
+        await page.close().catch(e => console.error(`Error closing page: ${e.message}`));
         
         return res.status(404).json({
           success: false,
@@ -1831,9 +1937,10 @@ class MovieBoxController {
       console.log('Fetching subtitle data from:', subtitleData.url);
       const response = await axios.get(subtitleData.url, { headers: this.headers });
       
-      await page.close();
+      // Close the page when done
+      await page.close().catch(e => console.error(`Error closing page: ${e.message}`));
       
-      // Cache the successful response
+      // Create the response data
       const responseData = {
         success: true,
         episode_info: {
@@ -1846,6 +1953,7 @@ class MovieBoxController {
         subtitle_data: response.data
       };
       
+      // Cache the successful response with the properly defined cacheKey
       movieboxCache.set(cacheKey, responseData, 7200); // Cache for 2 hours
       return res.json(responseData);
     } catch (error) {
@@ -1858,7 +1966,7 @@ class MovieBoxController {
           
           // Take a final error screenshot
           const timestamp = new Date().getTime();
-          const finalErrorPath = `./final-error-${tmdbId}-${timestamp}.png`;
+          const finalErrorPath = `./final-error-${error.message.replace(/[^a-z0-9]/gi, '-')}-${timestamp}.png`;
           await page.screenshot({ path: finalErrorPath, fullPage: true });
           console.error(`Final error screenshot saved to: ${finalErrorPath}`);
           
@@ -1887,6 +1995,63 @@ class MovieBoxController {
   async clearCache() {
     movieboxCache.flushAll();
     console.log('MovieBox cache cleared');
+  }
+
+  /**
+   * Debug helper to log page information
+   * @param {Object} page - Puppeteer page
+   * @param {string} stageName - Name of the current stage
+   */
+  async logPageInfo(page, stageName) {
+    console.log(`\n==== DEBUG INFO: ${stageName} ====`);
+    console.log(`Current URL: ${await page.url()}`);
+    console.log(`Page title: ${await page.title()}`);
+    
+    const pageMetrics = await page.metrics();
+    console.log(`Page metrics: ${JSON.stringify(pageMetrics, null, 2)}`);
+    
+    // Take a screenshot
+    const timestamp = new Date().getTime();
+    const screenshotPath = `./debug-${stageName.replace(/\s+/g, '-').toLowerCase()}-${timestamp}.png`;
+    await page.screenshot({ path: screenshotPath, fullPage: true });
+    console.log(`Screenshot saved to: ${screenshotPath}`);
+    
+    console.log(`==== END DEBUG INFO: ${stageName} ====\n`);
+  }
+
+  /**
+   * Manage browser tabs and ensure we don't have too many open
+   * @returns {Promise<void>}
+   */
+  async manageBrowserTabs() {
+    if (!browserInstance) return;
+    
+    try {
+      const pages = await browserInstance.pages();
+      console.log(`Currently have ${pages.length} browser tabs open`);
+      
+      // Keep only up to 3 tabs
+      if (pages.length > 3) {
+        console.log(`Closing ${pages.length - 3} tabs to manage resources`);
+        
+        // Sort pages by last activity time if available, otherwise just take the oldest ones
+        const pagesToClose = pages.slice(0, pages.length - 3);
+        
+        for (const page of pagesToClose) {
+          try {
+            const url = await page.url();
+            if (url !== 'about:blank') {
+              console.log(`Closing tab: ${url}`);
+              await page.close().catch(() => {});
+            }
+          } catch (e) {
+            console.log(`Error closing tab: ${e.message}`);
+          }
+        }
+      }
+    } catch (e) {
+      console.error(`Error managing browser tabs: ${e.message}`);
+    }
   }
 }
 

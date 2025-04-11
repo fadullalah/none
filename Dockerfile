@@ -1,13 +1,6 @@
-# Build stage
-FROM node:20-slim AS builder
-WORKDIR /usr/src/app
-COPY package*.json ./
-RUN npm ci --only=production
-COPY . .
+FROM node:18-slim
 
-# Run stage
-FROM node:20-slim
-# Install Chrome dependencies and Chrome
+# Install latest chrome dev package and fonts to support major charsets (Chinese, Japanese, Arabic, Hebrew, Thai and a few others)
 RUN apt-get update \
     && apt-get install -y wget gnupg \
     && wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | apt-key add - \
@@ -17,10 +10,15 @@ RUN apt-get update \
       --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
+# Create working directory
 WORKDIR /usr/src/app
-# Copy only production dependencies and source code
-COPY --from=builder /usr/src/app/node_modules ./node_modules
-COPY --from=builder /usr/src/app .
+
+# Install dependencies
+COPY package*.json ./
+RUN npm install
+
+# Copy source
+COPY . .
 
 # Add user for running the application
 RUN groupadd -r pptruser && useradd -r -g pptruser -G audio,video pptruser \
@@ -36,13 +34,10 @@ ENV CHROME_BIN=/usr/bin/google-chrome
 ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/google-chrome
 ENV API_TOKEN=b29bfe548cc2a3e4225effbd54ef0fda
 ENV UI_TOKENS=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpYXQiOjE3MzE1Mjc1NTIsIm5iZiI6MTczMTUyNzU1MiwiZXhwIjoxNzYyNjMxNTcyLCJkYXRhIjp7InVpZCI6MzYxNTkxLCJ0b2tlbiI6Ijc4NjdlYzc2NzcwODAyNjcxNWNlNTZjMWJiZDI1N2NkIn19.vXKdWeU8R_xe4gUMBg-hIxkftFogPdZEGtXvAw0IC-Q
-ENV NODE_OPTIONS="--max-old-space-size=6144"
 
 # Run everything after as non-privileged user
 USER pptruser
 
 EXPOSE 3001
 
-RUN npm install -g pm2
-
-CMD ["pm2-runtime", "start", "src/app.js", "-i", "8"]
+CMD ["node", "src/app.js"]

@@ -29,6 +29,7 @@
     "node-cache": "^5.1.2",
     "node-fetch": "^3.3.2",
     "playwright": "^1.49.1",
+    "pm2": "^6.0.5",
     "proxy-agent": "^6.5.0",
     "puppeteer": "^23.11.1",
     "puppeteer-core": "^23.11.0",

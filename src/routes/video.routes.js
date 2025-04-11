@@ -133,4 +133,8 @@ router.post('/subtitles/clear-cache', async (req, res) => {
 router.get('/moviebox/movie/:tmdbId', movieboxController.getMovieByTmdbId.bind(movieboxController));
 router.get('/moviebox/tv/:tmdbId', movieboxController.getTvEpisodeByTmdbId.bind(movieboxController));
 
+// MovieBox subtitle routes
+router.get('/moviebox/movie/:tmdbId/subtitles', movieboxController.getMovieSubtitlesByTmdbId.bind(movieboxController));
+router.get('/moviebox/tv/:tmdbId/subtitles', movieboxController.getTvEpisodeSubtitlesByTmdbId.bind(movieboxController));
+
 export default router;

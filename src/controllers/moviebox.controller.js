@@ -1093,6 +1093,690 @@ class MovieBoxController {
       Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
     });
   }
+
+  /**
+   * Capture subtitle/caption URL during navigation
+   * @param {Object} page - Puppeteer page
+   * @returns {Promise<Object>} - Subtitle information
+   */
+  async captureSubtitleUrl(page) {
+    return new Promise((resolve) => {
+      let capturedSubtitleData = null;
+      
+      // Listen for requests to the caption API
+      page.on('request', request => {
+        const url = request.url();
+        if (url.includes('/wefeed-h5-bff/web/subject/caption')) {
+          console.log(`Subtitle URL captured: ${url}`);
+          capturedSubtitleData = {
+            url: url,
+            params: Object.fromEntries(new URL(url).searchParams)
+          };
+          resolve(capturedSubtitleData);
+        }
+      });
+      
+      // Set a timeout in case subtitle URL is not found
+      setTimeout(() => {
+        if (!capturedSubtitleData) {
+          resolve(null);
+        }
+      }, 15000); // 15 seconds timeout
+    });
+  }
+
+  /**
+   * Get movie subtitles by TMDB ID
+   * @param {*} req - Express request object
+   * @param {*} res - Express response object
+   */
+  async getMovieSubtitlesByTmdbId(req, res) {
+    let browser, page;
+    try {
+      const tmdbId = req.params.tmdbId;
+      
+      // Get movie details from TMDB
+      const movieDetails = await this.getMovieDetailsFromTMDB(tmdbId);
+      
+      // Get title for better search results
+      const title = movieDetails.title || movieDetails.original_title;
+      
+      console.log(`Processing movie subtitle request for: "${title}" (TMDB ID: ${tmdbId})`);
+      
+      // Search for the movie on MovieBox
+      const searchResults = await this.enhancedSearch(movieDetails);
+      
+      if (searchResults.length === 0) {
+        return res.status(404).json({
+          success: false,
+          message: 'Movie not found on MovieBox',
+          error_details: {
+            search_query: title,
+            tmdb_id: tmdbId,
+            type: 'movie',
+            timestamp: new Date().toISOString()
+          }
+        });
+      }
+      
+      // Get the first result (most relevant)
+      const movie = searchResults[0];
+      console.log(`Found movie: "${movie.title}" (Rating: ${movie.rating})`);
+      
+      // Now we need to click on the result and capture the subtitle URL
+      browser = await this.getBrowser();
+      page = await browser.newPage();
+      
+      // Set up request interception
+      await page.setRequestInterception(true);
+      page.on('request', (request) => {
+        const resourceType = request.resourceType();
+        
+        // Allow all API requests (needed for subtitle requests)
+        if (request.url().includes('/wefeed-h5-bff/web/')) {
+          request.continue();
+        }
+        // Block less important resources
+        else if (['image', 'font'].includes(resourceType)) {
+          request.abort();
+        } else {
+          request.continue();
+        }
+      });
+      
+      // Set up promise to capture subtitle URL
+      const subtitlePromise = this.captureSubtitleUrl(page);
+      
+      await this.applyEnhancedPageHeaders(page);
+      await page.setDefaultNavigationTimeout(45000);
+      
+      // Navigate to search page
+      const searchUrl = `${this.searchUrl}?keyword=${encodeURIComponent(title)}`;
+      console.log(`Navigating to search page: ${searchUrl}`);
+      await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
+      
+      // Wait for search results to load
+      await page.waitForSelector('.pc-card', { timeout: 20000 });
+      
+      // Click on the movie card
+      const cardSelector = '.pc-card';
+      const cards = await page.$$(cardSelector);
+      
+      if (cards.length <= movie.cardIndex) {
+        throw new Error(`Card at index ${movie.cardIndex} not found, only ${cards.length} cards available`);
+      }
+      
+      // Get actual card title to confirm selection
+      const cardTitle = await page.evaluate(el => {
+        const titleEl = el.querySelector('.pc-card-title');
+        return titleEl ? titleEl.textContent.trim() : 'Unknown';
+      }, cards[movie.cardIndex]);
+      
+      console.log(`Clicking on movie card: "${cardTitle}" (index ${movie.cardIndex})`);
+      
+      // Click on the "Watch now" button for this card
+      const watchButton = await cards[movie.cardIndex].$('.pc-card-btn');
+      if (!watchButton) {
+        throw new Error('Watch button not found');
+      }
+      
+      await watchButton.click();
+      
+      // Wait for navigation to complete
+      console.log('Waiting for navigation after card click...');
+      await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 45000 });
+      
+      console.log(`Navigated to movie page: ${page.url()}`);
+      
+      // Wait a bit for page to initialize
+      await delay(2000); // Using our custom delay function
+      
+      // Try to interact with the player to trigger subtitle loading
+      try {
+        const playButtonSelectors = [
+          '.vjs-big-play-button', 
+          '.play-button',
+          '.pc-player-cot .play',
+          '[aria-label="Play"]',
+          '.player-control-play'
+        ];
+        
+        for (const selector of playButtonSelectors) {
+          const playButton = await page.$(selector);
+          if (playButton) {
+            console.log(`Found play button (${selector}), clicking it...`);
+            await playButton.click().catch(() => console.log(`Failed to click ${selector}`));
+            break;
+          }
+        }
+      } catch (err) {
+        console.log(`Error interacting with player: ${err.message}`);
+      }
+      
+      // Wait for subtitle URL to be captured or timeout
+      const subtitleData = await subtitlePromise;
+      
+      if (!subtitleData) {
+        console.log('No subtitle URL captured');
+        return res.status(404).json({
+          success: false,
+          message: 'No subtitles found for this movie',
+          movie_info: {
+            title: movie.title,
+            tmdb_id: tmdbId
+          }
+        });
+      }
+      
+      // Fetch the actual subtitle data
+      console.log('Fetching subtitle data from:', subtitleData.url);
+      const response = await axios.get(subtitleData.url, { headers: this.headers });
+      
+      await page.close();
+      
+      return res.json({
+        success: true,
+        movie_info: {
+          title: movie.title,
+          tmdb_id: tmdbId
+        },
+        subtitle_url: subtitleData.url,
+        subtitle_data: response.data
+      });
+    } catch (error) {
+      console.error(`Error getting movie subtitles from MovieBox: ${error.message}`);
+      
+      if (page) {
+        try {
+          const url = await page.url();
+          console.error(`Current URL: ${url}`);
+          await page.close().catch(() => {});
+        } catch (contentError) {
+          console.error(`Could not capture page URL: ${contentError.message}`);
+        }
+      }
+      
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to get movie subtitles from MovieBox',
+        error: error.message
+      });
+    }
+  }
+
+  /**
+   * Get TV episode subtitles by TMDB ID
+   * @param {*} req - Express request object
+   * @param {*} res - Express response object
+   */
+  async getTvEpisodeSubtitlesByTmdbId(req, res) {
+    let browser, page;
+    try {
+      const tmdbId = req.params.tmdbId;
+      const season = parseInt(req.query.season, 10);
+      const episode = parseInt(req.query.episode, 10);
+      
+      if (isNaN(season) || isNaN(episode)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Season and episode numbers are required',
+          error_details: {
+            provided_season: req.query.season,
+            provided_episode: req.query.episode,
+            tmdb_id: tmdbId
+          }
+        });
+      }
+      
+      // Get TV details from TMDB
+      const tvDetails = await this.getTVDetailsFromTMDB(tmdbId);
+      console.log(`Processing TV subtitle request for: "${tvDetails.name}" (TMDB ID: ${tmdbId}, Season: ${season}, Episode: ${episode})`);
+      
+      // Get title for better search results
+      const title = tvDetails.name || tvDetails.original_name;
+      
+      // Search for the TV show on MovieBox
+      const searchResults = await this.enhancedSearch(tvDetails);
+      
+      if (searchResults.length === 0) {
+        return res.status(404).json({
+          success: false,
+          message: 'TV show not found on MovieBox',
+          error_details: {
+            search_query: title,
+            tmdb_id: tmdbId,
+            type: 'tv',
+            requested_season: season,
+            requested_episode: episode,
+            timestamp: new Date().toISOString()
+          }
+        });
+      }
+      
+      // Get the first result (most relevant)
+      const show = searchResults[0];
+      console.log(`Found TV show: "${show.title}" (Rating: ${show.rating})`);
+      
+      // Now we need to click on the result, select season and episode, and capture subtitle URL
+      browser = await this.getBrowser();
+      page = await browser.newPage();
+      
+      // Set up request interception
+      await page.setRequestInterception(true);
+      page.on('request', (request) => {
+        const resourceType = request.resourceType();
+        
+        // Allow all API requests (needed for subtitle requests)
+        if (request.url().includes('/wefeed-h5-bff/web/')) {
+          request.continue();
+        }
+        // Block less important resources
+        else if (['image', 'font'].includes(resourceType)) {
+          request.abort();
+        } else {
+          request.continue();
+        }
+      });
+      
+      // Set up promise to capture subtitle URL
+      const subtitlePromise = this.captureSubtitleUrl(page);
+      
+      await this.applyEnhancedPageHeaders(page);
+      await page.setDefaultNavigationTimeout(60000); // Extended timeout
+      
+      // Navigate to search page
+      const searchUrl = `${this.searchUrl}?keyword=${encodeURIComponent(title)}`;
+      console.log(`Navigating to search page: ${searchUrl}`);
+      await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+      
+      // Wait for search results to load
+      await page.waitForSelector('.pc-card', { timeout: 30000 });
+      
+      // Click on the show card
+      const cardSelector = '.pc-card';
+      const cards = await page.$$(cardSelector);
+      
+      if (cards.length <= show.cardIndex) {
+        throw new Error(`Card at index ${show.cardIndex} not found, only ${cards.length} cards available`);
+      }
+      
+      // Get actual card title to confirm selection
+      const cardTitle = await page.evaluate(el => {
+        const titleEl = el.querySelector('.pc-card-title');
+        return titleEl ? titleEl.textContent.trim() : 'Unknown';
+      }, cards[show.cardIndex]);
+      
+      console.log(`Clicking on TV show card: "${cardTitle}" (index ${show.cardIndex})`);
+      
+      // Click on the "Watch now" button for this card
+      const watchButton = await cards[show.cardIndex].$('.pc-card-btn');
+      if (!watchButton) {
+        throw new Error('Watch button not found');
+      }
+      
+      await watchButton.click();
+      
+      // Wait for navigation to complete
+      console.log('Waiting for navigation after card click...');
+      await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 60000 });
+      
+      console.log(`Navigated to TV show page: ${page.url()}`);
+      
+      // Wait longer for page to initialize
+      await delay(5000); // Increased delay to allow page to fully load
+      
+      // Try to find season selectors using multiple approaches
+      try {
+        console.log(`Looking for season ${season} selector...`);
+        
+        // Take a screenshot to debug the page structure
+        const timestamp = new Date().getTime();
+        const debugScreenshotPath = `./debug-seasons-${tmdbId}-${timestamp}.png`;
+        await page.screenshot({ path: debugScreenshotPath, fullPage: true });
+        console.log(`Debug screenshot saved to: ${debugScreenshotPath}`);
+        
+        // Attempt to check page structure to see if it's a different layout
+        const pageStructure = await page.evaluate(() => {
+          return {
+            hasSeasonBox: !!document.querySelector('.pc-se-box'),
+            hasSeasonElement: !!document.querySelector('.pc-se'),
+            hasEpisodeContainer: !!document.querySelector('.pc-ep-contain'),
+            hasEpisodeElement: !!document.querySelector('.pc-ep'),
+            visibleElements: Array.from(document.querySelectorAll('div[class^="pc-"]')).map(el => el.className),
+            bodyHTML: document.body.innerHTML.substring(0, 1000) // First 1000 chars of HTML for debugging
+          };
+        });
+        
+        console.log('Page structure diagnosis:', JSON.stringify(pageStructure, null, 2));
+        
+        // Check if the show might have only one season (no season selection needed)
+        const hasEpisodeContainerDirectly = await page.$('.pc-ep-contain');
+        
+        if (hasEpisodeContainerDirectly) {
+          console.log('Show appears to have only one season, episodes directly visible');
+          // Skip season selection and proceed directly to episode selection
+        } else {
+          // Try multiple selectors for season container
+          const seasonSelectors = ['.pc-se-box', '.seasonsList', '.seasons-container', '[class*="season"]'];
+          let seasonContainer = null;
+          
+          for (const selector of seasonSelectors) {
+            console.log(`Trying season container selector: ${selector}`);
+            try {
+              // Increased timeout for waiting for season selector
+              seasonContainer = await page.waitForSelector(selector, { timeout: 30000 }).catch(() => null);
+              if (seasonContainer) {
+                console.log(`Found season container with selector: ${selector}`);
+                break;
+              }
+            } catch (err) {
+              console.log(`Selector ${selector} not found`);
+            }
+          }
+          
+          if (!seasonContainer) {
+            throw new Error('No season container found on page, check the debug screenshot for page structure');
+          }
+          
+          // Try to find season elements with multiple selectors
+          const seasonElementSelectors = ['.pc-se', '.season-item', '[class*="season"]'];
+          let seasonElements = [];
+          
+          for (const selector of seasonElementSelectors) {
+            console.log(`Trying season element selector: ${selector}`);
+            const elements = await page.$$(selector);
+            if (elements.length > 0) {
+              console.log(`Found ${elements.length} season elements with selector: ${selector}`);
+              seasonElements = elements;
+              break;
+            }
+          }
+          
+          if (seasonElements.length === 0) {
+            throw new Error('No season elements found on page');
+          }
+          
+          console.log(`Found ${seasonElements.length} seasons. Looking for S${season.toString().padStart(2, '0')}`);
+          
+          // Find correct season with more flexible matching
+          let foundSeasonElement = false;
+          for (let i = 0; i < seasonElements.length; i++) {
+            const seasonText = await page.evaluate(el => el.textContent.trim(), seasonElements[i]);
+            console.log(`Season ${i+1} text: "${seasonText}"`);
+            
+            // More flexible matching for season number
+            const seasonMatches = [
+              `S${season.toString().padStart(2, '0')}`,    // S01
+              `Season ${season}`,                          // Season 1
+              `Season ${season.toString().padStart(2, '0')}`, // Season 01
+              `${season}`,                                 // 1
+              `الموسم ${season}`                           // Arabic "Season 1"
+            ];
+            
+            if (seasonMatches.some(match => seasonText.includes(match))) {
+              console.log(`Clicking on season ${season} (matched text: "${seasonText}")`);
+              await seasonElements[i].click();
+              foundSeasonElement = true;
+              break;
+            }
+          }
+          
+          if (!foundSeasonElement) {
+            // If no exact match, try clicking on the first season element if we're looking for season 1
+            if (season === 1 && seasonElements.length > 0) {
+              console.log('No exact match for Season 1, trying first season element');
+              await seasonElements[0].click();
+              foundSeasonElement = true;
+            } else {
+              throw new Error(`Season ${season} not found on page`);
+            }
+          }
+        }
+        
+      } catch (seasonError) {
+        console.error(`Error selecting season: ${seasonError.message}`);
+        
+        // Take a screenshot of the error state
+        const timestamp = new Date().getTime();
+        const errorScreenshotPath = `./error-seasons-${tmdbId}-${timestamp}.png`;
+        await page.screenshot({ path: errorScreenshotPath, fullPage: true });
+        console.error(`Error screenshot saved to: ${errorScreenshotPath}`);
+        
+        // Dump the HTML content for debugging
+        const htmlContent = await page.content();
+        console.error(`HTML content sample: ${htmlContent.substring(0, 500)}...`);
+        
+        throw new Error(`Failed to select season ${season}: ${seasonError.message}`);
+      }
+      
+      // Wait longer for the episodes to update
+      await delay(5000); // Increased delay
+      
+      // Find and click on the episode with more flexible selectors
+      try {
+        console.log(`Looking for episode ${episode} selector...`);
+        
+        // Take a screenshot to debug the episode structure
+        const timestamp = new Date().getTime();
+        const debugEpScreenshotPath = `./debug-episodes-${tmdbId}-${timestamp}.png`;
+        await page.screenshot({ path: debugEpScreenshotPath, fullPage: true });
+        console.log(`Debug episode screenshot saved to: ${debugEpScreenshotPath}`);
+        
+        // Try multiple selectors for episode container
+        const episodeContainerSelectors = ['.pc-ep-contain', '.episodes-container', '.episodesList', '[class*="episode"]'];
+        let episodeContainer = null;
+        
+        for (const selector of episodeContainerSelectors) {
+          console.log(`Trying episode container selector: ${selector}`);
+          try {
+            episodeContainer = await page.waitForSelector(selector, { timeout: 30000 }).catch(() => null);
+            if (episodeContainer) {
+              console.log(`Found episode container with selector: ${selector}`);
+              break;
+            }
+          } catch (err) {
+            console.log(`Episode container selector ${selector} not found`);
+          }
+        }
+        
+        if (!episodeContainer) {
+          throw new Error('No episode container found on page');
+        }
+        
+        // Try multiple selectors for episode elements
+        const episodeElementSelectors = ['.pc-ep', '.episode-item', '[class*="episode"]'];
+        let episodeElements = [];
+        
+        for (const selector of episodeElementSelectors) {
+          console.log(`Trying episode element selector: ${selector}`);
+          const elements = await page.$$(selector);
+          if (elements.length > 0) {
+            console.log(`Found ${elements.length} episode elements with selector: ${selector}`);
+            episodeElements = elements;
+            break;
+          }
+        }
+        
+        if (episodeElements.length === 0) {
+          throw new Error('No episode elements found on page');
+        }
+        
+        console.log(`Found ${episodeElements.length} episodes. Looking for episode ${episode.toString().padStart(2, '0')}`);
+        
+        // Find correct episode with more flexible matching
+        let foundEpisodeElement = false;
+        for (let i = 0; i < episodeElements.length; i++) {
+          const episodeText = await page.evaluate(el => {
+            // Check for span or any text content that might contain episode number
+            const span = el.querySelector('span');
+            const text = span ? span.textContent.trim() : el.textContent.trim();
+            return text;
+          }, episodeElements[i]);
+          
+          console.log(`Episode ${i+1} text: "${episodeText}"`);
+          
+          // More flexible matching for episode number
+          const episodeMatches = [
+            `${episode.toString().padStart(2, '0')}`,     // 01
+            `E${episode.toString().padStart(2, '0')}`,    // E01
+            `Episode ${episode}`,                         // Episode 1
+            `${episode}`,                                 // 1
+            `الحلقة ${episode}`                           // Arabic "Episode 1"
+          ];
+          
+          if (episodeMatches.some(match => episodeText.includes(match))) {
+            console.log(`Clicking on episode ${episode} (matched text: "${episodeText}")`);
+            await episodeElements[i].click();
+            foundEpisodeElement = true;
+            break;
+          }
+        }
+        
+        if (!foundEpisodeElement) {
+          // If no exact match and we're looking for episode 1, try the first episode
+          if (episode === 1 && episodeElements.length > 0) {
+            console.log('No exact match for Episode 1, trying first episode element');
+            await episodeElements[0].click();
+            foundEpisodeElement = true;
+          } else {
+            throw new Error(`Episode ${episode} not found on page`);
+          }
+        }
+        
+      } catch (episodeError) {
+        console.error(`Error selecting episode: ${episodeError.message}`);
+        
+        // Take a screenshot of the error state
+        const timestamp = new Date().getTime();
+        const errorScreenshotPath = `./error-episodes-${tmdbId}-${timestamp}.png`;
+        await page.screenshot({ path: errorScreenshotPath, fullPage: true });
+        console.error(`Error screenshot saved to: ${errorScreenshotPath}`);
+        
+        throw new Error(`Failed to select episode ${episode}: ${episodeError.message}`);
+      }
+      
+      // Wait longer for video player to load after selecting episode
+      await delay(5000); // Increased delay
+      
+      // Try multiple times to interact with the player to trigger subtitle loading
+      let playSuccess = false;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          console.log(`Play button click attempt ${attempt + 1}`);
+          
+          const playButtonSelectors = [
+            '.vjs-big-play-button', 
+            '.play-button',
+            '.pc-player-cot .play',
+            '[aria-label="Play"]',
+            '.player-control-play',
+            '.art-video-player .art-control-button',
+            'button.art-control'
+          ];
+          
+          for (const selector of playButtonSelectors) {
+            const playButton = await page.$(selector);
+            if (playButton) {
+              console.log(`Found play button (${selector}), clicking it...`);
+              await playButton.click().catch(() => console.log(`Failed to click ${selector}`));
+              playSuccess = true;
+              break;
+            }
+          }
+          
+          if (playSuccess) break;
+          
+          // If no button found, try clicking on the video element itself
+          const videoElement = await page.$('video');
+          if (videoElement) {
+            console.log('Clicking directly on video element');
+            await videoElement.click();
+            playSuccess = true;
+            break;
+          }
+          
+          // Wait before next attempt
+          await delay(2000);
+        } catch (err) {
+          console.log(`Error in play attempt ${attempt + 1}: ${err.message}`);
+        }
+      }
+      
+      // Wait for subtitle URL to be captured or timeout
+      const subtitleData = await subtitlePromise;
+      
+      if (!subtitleData) {
+        console.log('No subtitle URL captured');
+        
+        // Take a screenshot to help debug why subtitles weren't found
+        const timestamp = new Date().getTime();
+        const finalScreenshotPath = `./no-subtitles-${tmdbId}-${timestamp}.png`;
+        await page.screenshot({ path: finalScreenshotPath, fullPage: true });
+        console.log(`Final screenshot saved to: ${finalScreenshotPath}`);
+        
+        return res.status(404).json({
+          success: false,
+          message: 'No subtitles found for this episode',
+          episode_info: {
+            show_title: show.title,
+            tmdb_id: tmdbId,
+            season: season,
+            episode: episode
+          }
+        });
+      }
+      
+      // Fetch the actual subtitle data
+      console.log('Fetching subtitle data from:', subtitleData.url);
+      const response = await axios.get(subtitleData.url, { headers: this.headers });
+      
+      await page.close();
+      
+      return res.json({
+        success: true,
+        episode_info: {
+          show_title: show.title,
+          tmdb_id: tmdbId,
+          season: season,
+          episode: episode
+        },
+        subtitle_url: subtitleData.url,
+        subtitle_data: response.data
+      });
+    } catch (error) {
+      console.error(`Error getting TV episode subtitles from MovieBox: ${error.message}`);
+      
+      if (page) {
+        try {
+          const url = await page.url();
+          console.error(`Current URL: ${url}`);
+          
+          // Take a final error screenshot
+          const timestamp = new Date().getTime();
+          const finalErrorPath = `./final-error-${tmdbId}-${timestamp}.png`;
+          await page.screenshot({ path: finalErrorPath, fullPage: true });
+          console.error(`Final error screenshot saved to: ${finalErrorPath}`);
+          
+          await page.close().catch(() => {});
+        } catch (contentError) {
+          console.error(`Could not capture page URL: ${contentError.message}`);
+        }
+      }
+      
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to get TV episode subtitles from MovieBox',
+        error: error.message,
+        error_details: {
+          request_params: {
+            tmdb_id: req.params.tmdbId,
+            season: req.query.season,
+            episode: req.query.episode
+          }
+        }
+      });
+    }
+  }
 }
 
 export const movieboxController = new MovieBoxController(); 

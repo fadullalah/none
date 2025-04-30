@@ -376,32 +376,35 @@ class PlayerScraperController {
   }
   
   /**
-   * Extract video URL using direct HTTP request with proxy
+   * Extract video URL using direct HTTP request with proxy (now using ScraperAPI)
    */
   async extractDirectMethodWithProxy(url) {
     try {
-      const proxy = this.getRandomProxy();
-      if (!proxy) {
-        throw new Error('No proxies available');
-      }
-      
-      const httpsAgent = new HttpsProxyAgent(proxy);
-      
+      // ScraperAPI proxy details
+      const scraperApiHost = 'proxy-server.scraperapi.com';
+      const scraperApiPort = 8001;
+      const scraperApiUser = 'scraperapi';
+      const scraperApiKey = '169e05c208dcbe5e453edd9c5957cc40';
+
+      // Format: http://username:password@host:port
+      const proxyUrl = `http://${scraperApiUser}:${scraperApiKey}@${scraperApiHost}:${scraperApiPort}`;
+      const httpsAgent = new HttpsProxyAgent(proxyUrl);
+
       const response = await axios.get(url, {
         headers: this.getBrowserHeaders(),
         timeout: 15000,
         httpsAgent,
         proxy: false // Let the HttpsProxyAgent handle the proxy
       });
-      
+
       const html = response.data;
-      
+
       // Parse HTML
       const dom = new JSDOM(html);
       const document = dom.window.document;
-      
+
       // Try various common selectors and patterns
-      
+
       // 1. Look for video tags
       const videoTags = document.querySelectorAll('video source');
       for (const source of videoTags) {
@@ -410,19 +413,19 @@ class PlayerScraperController {
           return this.resolveUrl(src, url);
         }
       }
-      
+
       // 2. Look for m3u8 links in the HTML
       const m3u8Match = html.match(/"(https?:\/\/[^"]+\.m3u8[^"]*)"/);
       if (m3u8Match && m3u8Match[1]) {
         return m3u8Match[1];
       }
-      
+
       // 3. Look for mp4 links
       const mp4Match = html.match(/"(https?:\/\/[^"]+\.mp4[^"]*)"/);
       if (mp4Match && mp4Match[1]) {
         return mp4Match[1];
       }
-      
+
       return null;
     } catch (error) {
       // Simplified error logging - just log the message, not the full error
@@ -531,21 +534,21 @@ class PlayerScraperController {
   }
   
   /**
-   * Extract video URL using Puppeteer with proxy
+   * Extract video URL using Puppeteer with proxy (now using ScraperAPI)
    */
   async extractWithPuppeteerAndProxy(url) {
     let browser = null;
     try {
-      const proxy = this.getRandomProxy();
-      if (!proxy) {
-        throw new Error('No proxies available');
-      }
-      
-      // Extract host and port from proxy URL
-      const proxyUrl = new URL(proxy);
-      const proxyHost = proxyUrl.hostname;
-      const proxyPort = proxyUrl.port || 80;
-      
+      // ScraperAPI proxy details
+      const scraperApiHost = 'proxy-server.scraperapi.com';
+      const scraperApiPort = 8001;
+      const scraperApiUser = 'scraperapi';
+      const scraperApiKey = '169e05c208dcbe5e453edd9c5957cc40';
+
+      // Format: http://username:password@host:port
+      const proxyAuth = `${scraperApiUser}:${scraperApiKey}`;
+      const proxyServer = `http://${proxyAuth}@${scraperApiHost}:${scraperApiPort}`;
+
       browser = await puppeteerExtra.launch({
         headless: 'new',
         args: [
@@ -553,12 +556,18 @@ class PlayerScraperController {
           '--disable-setuid-sandbox',
           '--disable-web-security',
           '--disable-features=IsolateOrigins,site-per-process',
-          `--proxy-server=${proxyHost}:${proxyPort}`
+          `--proxy-server=${scraperApiHost}:${scraperApiPort}`
         ]
       });
-      
+
       const page = await browser.newPage();
-      
+
+      // Set proxy authentication for ScraperAPI
+      await page.authenticate({
+        username: scraperApiUser,
+        password: scraperApiKey
+      });
+
       // Set a realistic user agent
       await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36');
       

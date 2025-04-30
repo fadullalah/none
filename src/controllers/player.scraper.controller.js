@@ -6,6 +6,7 @@ import { JSDOM } from 'jsdom';
 import NodeCache from 'node-cache';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 import https from 'https';
+import { execSync } from 'child_process';
 
 // Register the stealth plugin
 puppeteerExtra.use(StealthPlugin());
@@ -389,14 +390,16 @@ class PlayerScraperController {
 
       // Format: http://username:password@host:port
       const proxyUrl = `http://${scraperApiUser}:${scraperApiKey}@${scraperApiHost}:${scraperApiPort}`;
-      const agent = new https.Agent({ rejectUnauthorized: false });
-      const httpsAgent = new HttpsProxyAgent(proxyUrl);
+      // Use a custom agent that disables SSL verification
+      const httpsAgent = new HttpsProxyAgent({
+        ...new URL(proxyUrl),
+        rejectUnauthorized: false
+      });
 
       const response = await axios.get(url, {
         headers: this.getBrowserHeaders(),
         timeout: 15000,
         httpsAgent,
-        httpAgent: agent,
         proxy: false // Let the HttpsProxyAgent handle the proxy
       });
 
@@ -443,6 +446,12 @@ class PlayerScraperController {
   async extractWithPuppeteer(url) {
     let browser = null;
     try {
+      // Log process count for debugging EAGAIN
+      try {
+        const procCount = execSync('ps -e --no-headers | wc -l').toString().trim();
+        console.log('Current process count:', procCount);
+      } catch (e) {}
+
       browser = await puppeteerExtra.launch({
         headless: 'new',
         args: [

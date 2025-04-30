@@ -38,7 +38,9 @@ COPY . .
 RUN groupadd -r pptruser && useradd -r -g pptruser -G audio,video pptruser \
     && mkdir -p /home/pptruser/Downloads \
     && chown -R pptruser:pptruser /home/pptruser \
-    && chown -R pptruser:pptruser /usr/src/app
+    && chown -R pptruser:pptruser /usr/src/app \
+    && echo "pptruser soft nproc 4096" >> /etc/security/limits.conf \
+    && echo "pptruser hard nproc 4096" >> /etc/security/limits.conf
 
 # Environment variables
 ENV PORT=3001

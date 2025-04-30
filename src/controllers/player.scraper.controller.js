@@ -5,6 +5,7 @@ import axios from 'axios';
 import { JSDOM } from 'jsdom';
 import NodeCache from 'node-cache';
 import { HttpsProxyAgent } from 'https-proxy-agent';
+import https from 'https';
 
 // Register the stealth plugin
 puppeteerExtra.use(StealthPlugin());
@@ -388,12 +389,14 @@ class PlayerScraperController {
 
       // Format: http://username:password@host:port
       const proxyUrl = `http://${scraperApiUser}:${scraperApiKey}@${scraperApiHost}:${scraperApiPort}`;
+      const agent = new https.Agent({ rejectUnauthorized: false });
       const httpsAgent = new HttpsProxyAgent(proxyUrl);
 
       const response = await axios.get(url, {
         headers: this.getBrowserHeaders(),
         timeout: 15000,
         httpsAgent,
+        httpAgent: agent,
         proxy: false // Let the HttpsProxyAgent handle the proxy
       });
 
@@ -446,7 +449,9 @@ class PlayerScraperController {
           '--no-sandbox', 
           '--disable-setuid-sandbox',
           '--disable-web-security',
-          '--disable-features=IsolateOrigins,site-per-process'
+          '--disable-features=IsolateOrigins,site-per-process',
+          '--single-process',
+          '--disable-dev-shm-usage'
         ]
       });
       
@@ -556,6 +561,8 @@ class PlayerScraperController {
           '--disable-setuid-sandbox',
           '--disable-web-security',
           '--disable-features=IsolateOrigins,site-per-process',
+          '--single-process',
+          '--disable-dev-shm-usage',
           `--proxy-server=${scraperApiHost}:${scraperApiPort}`
         ]
       });

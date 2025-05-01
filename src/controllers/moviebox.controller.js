@@ -68,6 +68,7 @@ class MovieBoxController {
     this.searchUrl = `${this.baseUrl}/web/searchResult`;
     this.tmdbApiKey = process.env.API_TOKEN;
     this.tmdbApiBaseUrl = 'https://api.themoviedb.org/3';
+    this.cookies = null; // Added to store cookies
     
     // Initialize headers
     this.headers = {
@@ -123,9 +124,9 @@ class MovieBoxController {
    */
   async getBrowser() {
     if (!browserInstance) {
-      console.log('Creating new browser instance for MovieBox in headless mode');
+      console.log('Creating new browser instance for MovieBox with visible UI');
       browserInstance = await puppeteerExtra.launch({
-        headless: "new",  // Changed from false to "new" to make browser headless
+        headless: "new",  // Changed from "new" to false to make browser visible
         defaultViewport: {
           width: 1366,
           height: 768
@@ -142,7 +143,7 @@ class MovieBoxController {
           '--disable-infobars'
         ],
         ignoreDefaultArgs: ['--enable-automation'], // Hide automation
-        slowMo: 20 // Reduced from 50ms to 20ms since we don't need to see operations
+        slowMo: 50 // Increased from 20ms to 50ms to better see operations
       });
     }
     
@@ -156,8 +157,18 @@ class MovieBoxController {
   async cleanupBrowser() {
     if (browserInstance && Date.now() - browserLastUsed > BROWSER_IDLE_TIMEOUT) {
       console.log('Browser has been idle for too long. Closing it automatically.');
-      // In headless mode, we can automatically close the browser
       await browserInstance.close();
+      browserInstance = null;
+    }
+  }
+
+  /**
+   * Force close browser instance
+   */
+  async forceCloseBrowser() {
+    if (browserInstance) {
+      console.log('Force closing browser instance');
+      await browserInstance.close().catch(err => console.error('Error closing browser:', err.message));
       browserInstance = null;
     }
   }
@@ -362,12 +373,6 @@ class MovieBoxController {
       });
       
       console.log(`Found ${searchResults.length} search results`);
-      
-      // Take a screenshot of the search results
-      const timestamp = new Date().getTime();
-      const screenshotPath = `./search-results-${timestamp}.png`;
-      await page.screenshot({ path: screenshotPath, fullPage: true });
-      console.log(`Search results screenshot saved to: ${screenshotPath}`);
       
       // Close the page when we're done with it
       await page.close().catch(() => {});
@@ -975,21 +980,43 @@ class MovieBoxController {
    * @param {string} subjectId - Subject ID
    * @param {number|null} season - Season number for TV shows
    * @param {number|null} episode - Episode number for TV shows
+   * @param {string|null} refererUrl - Referer URL for the request
    * @returns {Promise<Object>} - API response
    */
-  async getDirectApiData(subjectId, season = null, episode = null) {
+  async getDirectApiData(subjectId, season = null, episode = null, refererUrl = null) {
     try {
       let apiUrl = `${this.baseUrl}/wefeed-h5-bff/web/subject/play?subjectId=${subjectId}`;
       
       // Add season and episode parameters for TV shows
       if (season !== null && episode !== null) {
         apiUrl += `&se=${season}&ep=${episode}`;
+      } else {
+        // For movies, explicitly set se=0 and ep=0
+        apiUrl += '&se=0&ep=0';
       }
       
       console.log(`Fetching data from API: ${apiUrl}`);
       
+      // Create request headers that mimic a real browser request
+      const requestHeaders = {
+        'authority': 'h5.aoneroom.com',
+        'accept': 'application/json, text/plain, */*',
+        'accept-language': 'en-US,en;q=0.9',
+        'user-agent': this.headers['User-Agent'],
+        'origin': this.baseUrl,
+        'referer': refererUrl || `${this.baseUrl}/movies/detail?subjectId=${subjectId}`
+      };
+      
+      // Get cookies from the page if available
+      if (this.cookies) {
+        requestHeaders['cookie'] = this.cookies;
+        console.log('Including cookies in API request');
+      }
+      
+      console.log('Using request headers:', JSON.stringify(requestHeaders, null, 2));
+      
       const response = await axios.get(apiUrl, {
-        headers: this.headers,
+        headers: requestHeaders,
         timeout: 30000
       });
       
@@ -1126,11 +1153,21 @@ class MovieBoxController {
         throw new Error('Failed to extract subject ID for movie');
       }
       
+      // ADDED: Get the current URL to use as referer
+      const currentUrl = await page.url();
+      console.log(`Current page URL (will use as referer): ${currentUrl}`);
+      
+      // ADDED: Extract cookies from page
+      const cookies = await page.cookies();
+      const cookieString = cookies.map(cookie => `${cookie.name}=${cookie.value}`).join('; ');
+      console.log(`Extracted ${cookies.length} cookies from page`);
+      this.cookies = cookieString;
+      
       // Close the page as we don't need it anymore
       await page.close();
       
-      // Get data directly from the API
-      const apiData = await this.getDirectApiData(subjectId);
+      // Get data directly from the API with referer URL
+      const apiData = await this.getDirectApiData(subjectId, null, null, currentUrl);
       
       // Extract video URL from API response
       const videoUrl = this.extractVideoUrlFromApiResponse(apiData);
@@ -1164,6 +1201,10 @@ class MovieBoxController {
       });
       
       console.log(`[Time] Total movie request time: ${getTimeDiff(totalStartTime)}`);
+      
+      // Force close browser after successful request
+      await this.forceCloseBrowser();
+      
       return res.json({
         ...responseData,
         timing: {
@@ -1183,6 +1224,9 @@ class MovieBoxController {
         }
       }
       
+      // Force close browser on error
+      await this.forceCloseBrowser();
+      
       return res.status(500).json({
         success: false,
         message: 'Failed to get movie from MovieBox',
@@ -1198,7 +1242,10 @@ class MovieBoxController {
    */
   async getTvEpisodeByTmdbId(req, res) {
     const totalStartTime = performance.now();
-    const { tmdbId, season, episode } = req.params;
+    const tmdbId = req.params.tmdbId;
+    // Fix: Get season and episode from query params instead of route params
+    const season = parseInt(req.query.season, 10);
+    const episode = parseInt(req.query.episode, 10);
     
     // Check cache first
     const cacheKey = `tv-${tmdbId}-${season}-${episode}`;
@@ -1285,11 +1332,21 @@ class MovieBoxController {
         throw new Error('Failed to extract subject ID for TV show');
       }
       
+      // ADDED: Get the current URL to use as referer
+      const currentUrl = await page.url();
+      console.log(`Current page URL (will use as referer): ${currentUrl}`);
+      
+      // ADDED: Extract cookies from page
+      const cookies = await page.cookies();
+      const cookieString = cookies.map(cookie => `${cookie.name}=${cookie.value}`).join('; ');
+      console.log(`Extracted ${cookies.length} cookies from page`);
+      this.cookies = cookieString;
+      
       // Close the page as we don't need it anymore
       await page.close();
       
-      // Get data directly from the API with season and episode parameters
-      const apiData = await this.getDirectApiData(subjectId, season, episode);
+      // Get data directly from the API with referer URL
+      const apiData = await this.getDirectApiData(subjectId, season, episode, currentUrl);
       
       // Extract video URL from API response
       const videoUrl = this.extractVideoUrlFromApiResponse(apiData);
@@ -1324,6 +1381,10 @@ class MovieBoxController {
       });
       
       console.log(`[Time] Total TV request time: ${getTimeDiff(totalStartTime)}`);
+      
+      // Force close browser after successful request
+      await this.forceCloseBrowser();
+      
       return res.json({
         ...responseData,
         timing: {
@@ -1349,6 +1410,9 @@ class MovieBoxController {
           console.error(`Could not capture page URL: ${contentError.message}`);
         }
       }
+      
+      // Force close browser on error
+      await this.forceCloseBrowser();
       
       return res.status(500).json({
         success: false,
@@ -1621,6 +1685,10 @@ class MovieBoxController {
       });
       
       console.log(`[Time] Total movie subtitles request time: ${getTimeDiff(totalStartTime)}`);
+      
+      // Force close browser after successful request
+      await this.forceCloseBrowser();
+      
       return res.json(responseData);
     } catch (error) {
       console.error(`Error getting movie subtitles from MovieBox: ${error.message}`);
@@ -1634,6 +1702,9 @@ class MovieBoxController {
           console.error(`Could not capture page URL: ${contentError.message}`);
         }
       }
+      
+      // Force close browser on error
+      await this.forceCloseBrowser();
       
       return res.status(500).json({
         success: false,
@@ -2098,6 +2169,10 @@ class MovieBoxController {
       
       // Cache the successful response with the properly defined cacheKey
       movieboxCache.set(cacheKey, responseData, 7200); // Cache for 2 hours
+      
+      // Force close browser after successful request
+      await this.forceCloseBrowser();
+      
       return res.json(responseData);
     } catch (error) {
       console.error(`Error getting TV episode subtitles from MovieBox: ${error.message}`);
@@ -2118,6 +2193,9 @@ class MovieBoxController {
           console.error(`Could not capture page URL: ${contentError.message}`);
         }
       }
+      
+      // Force close browser on error
+      await this.forceCloseBrowser();
       
       return res.status(500).json({
         success: false,

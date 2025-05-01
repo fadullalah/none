@@ -1,27 +1,22 @@
 import fetch from 'node-fetch';
 import * as cheerio from 'cheerio';
-import { spawn } from 'child_process';
-import { promisify } from 'util';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
 import NodeCache from 'node-cache';
 import { bunnyStreamController } from './bunny.controller.js';
 
-// Get the directory name of the current module
+// Get directory name
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-// Create a cache for storing ShowBox results (TTL: 12 hours)
-const showboxCache = new NodeCache({ stdTTL: 43200 });
-
-// Add these near the top with other cache declarations
+// Caches
+const showboxCache = new NodeCache({ stdTTL: 43200 }); // 12 hours
 const imdbCache = new NodeCache({ stdTTL: 172800 }); // 48 hours
 const urlCache = new NodeCache({ stdTTL: 86400 }); // 24 hours
+const streamLinkCache = new NodeCache({ stdTTL: 3600 }); // 1 hour
 
-// Add a memory cache for stream links to avoid repeated calls
-const streamLinkCache = new NodeCache({ stdTTL: 3600 }); // 1 hour cache
-
+// Constants
 const SCRAPER_API_KEY = '169e05c208dcbe5e453edd9c5957cc40';
 const UI_TOKENS = [
   'eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpYXQiOjE3NDI1NjM4MjYsIm5iZiI6MTc0MjU2MzgyNiwiZXhwIjoxNzczNjY3ODQ2LCJkYXRhIjp7InVpZCI6NjIzMzk2LCJ0b2tlbiI6IjUxZTVlMGQ5OTk5ZmYyNGNhNDU3Mjc0Y2Q2YTVhMmRmIn19.h5TNhw5vVjBdcyXruSSO3y_HfopZNr1NoEiAQBN0Rfk',
@@ -30,17 +25,10 @@ const UI_TOKENS = [
   'eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpYXQiOjE3NDI1NjQxNDAsIm5iZiI6MTc0MjU2NDE0MCwiZXhwIjoxNzczNjY4MTYwLCJkYXRhIjp7InVpZCI6NjIzMzkxLCJ0b2tlbiI6IjQ0NGQ3ZjFhZTI1YzJkYjU2MjkwYWJhMWNmZWNjMzdjIn19.GjtPfpZP2mSXGc43ZMmO_tK5BS6AYFMbHT4f_rN1E9I',
   'eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpYXQiOjE3NDI2MDEwMTksIm5iZiI6MTc0MjYwMTAxOSwiZXhwIjoxNzczNzA1MDM5LCJkYXRhIjp7InVpZCI6NDg4NDc5LCJ0b2tlbiI6ImE1ZGI0ZmU1OGQ1YzI5YmE1OTZhZDlhYjkyZTBjNzI1In19.d2s2L0j1c4sVeJkRieZD2aoREh-WTjLvPSCnkCdtiBM',
   'eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpYXQiOjE3NDI2MTUxNjEsIm5iZiI6MTc0MjYxNTE2MSwiZXhwIjoxNzczNzE5MTgxLCJkYXRhIjp7InVpZCI6Njg5Njk2LCJ0b2tlbiI6ImRmZWMyZDdhOWRiNTRkYWE1NzYwNWE5NjcyYjhkODAwIn19.SlVYXj_IMWwRUuCvC2cXOAaVLEqgzexEC4NEiJqupSo',
-  ];
-
-// Define quality priority order
-const QUALITY_PRIORITY = [
-  '4K HDR', '4K', 'ORIGINAL', '1080P', '720P', '480P', '360P'
 ];
+const FETCH_TIMEOUT = 8000;
 
-// Add near the top with other constants
-const FETCH_TIMEOUT = 8000; // 8 second timeout for all fetch requests
-
-// Replace regular fetch with timeout fetch
+// Core functions
 async function fetchWithTimeout(url, options = {}) {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT);
@@ -58,24 +46,18 @@ async function fetchWithTimeout(url, options = {}) {
   }
 }
 
-// Replace the complex getBestQualitySource with a faster version
 const getBestQualitySource = (sources) => {
-  if (!sources || !Array.isArray(sources) || sources.length === 0) {
-    return null;
-  }
-
-  // Simple map of quality priorities
+  if (!sources || !Array.isArray(sources) || sources.length === 0) return null;
+  
   const qualityScore = {
     '4K HDR': 100, '4K': 90, 'ORIGINAL': 85, '1080P': 80, 
     '720P': 70, '480P': 60, '360P': 50
   };
   
-  // Sort with faster comparison
   return sources.sort((a, b) => {
     const aQuality = (a.quality || '').toUpperCase();
     const bQuality = (b.quality || '').toUpperCase();
     
-    // Direct quality comparison using lookup
     for (const q in qualityScore) {
       const aHas = aQuality.includes(q);
       const bHas = bQuality.includes(q);
@@ -88,121 +70,75 @@ const getBestQualitySource = (sources) => {
   })[0];
 };
 
-// Helper function to prioritize sources based on quality
-const getBestQualitySourceOld = (sources) => {
-  if (!sources || !Array.isArray(sources) || sources.length === 0) {
-    return null;
-  }
-
-  // First check for specific quality labels
-  for (const quality of QUALITY_PRIORITY) {
-    const source = sources.find(src => 
-      src.quality && src.quality.toUpperCase().includes(quality)
-    );
-    if (source) return source;
-  }
-
-  // If no specific quality found, try to determine from resolution or file size
-  sources.sort((a, b) => {
-    // Try to extract resolution height if present in the quality string
-    const getHeight = (src) => {
-      if (!src.quality) return 0;
-      const match = src.quality.match(/(\d+)[pP]/);
-      return match ? parseInt(match[1], 10) : 0;
-    };
-
-    const heightA = getHeight(a);
-    const heightB = getHeight(b);
-
-    // If we found heights for both, compare them
-    if (heightA && heightB) {
-      return heightB - heightA; // Higher resolution first
-    }
-
-    // Otherwise default to first source
-    return 0;
-  });
-
-  return sources[0];
-};
-
-// Helper to generate a consistent title format for Bunny CDN
-const generateVideoTitle = (type, tmdbId, title, season = null, episode = null, quality = null) => {
-  let videoTitle = `${type}_${tmdbId}_${title.replace(/[^\w\s]/gi, '')}`;
-  
-  if (type === 'tv' && season !== null && episode !== null) {
-    videoTitle += `_S${season.toString().padStart(2, '0')}E${episode.toString().padStart(2, '0')}`;
-  }
-  
-  if (quality) {
-    videoTitle += `_${quality}`;
-  }
-  
-  return videoTitle.replace(/\s+/g, '_').substring(0, 100); // Ensure title isn't too long
-};
-
 function getScraperUrl(url) {
   return `http://api.scraperapi.com?api_key=${SCRAPER_API_KEY}&url=${encodeURIComponent(url)}`;
 }
 
-async function getPythonScrapedLinks(shareUrl, customToken = null) {
-  const token = customToken || UI_TOKENS[Math.floor(Math.random() * UI_TOKENS.length)];
+async function getStreamLinks(fid, customToken = null) {
+  const cacheKey = `stream:${fid}`;
+  const cached = streamLinkCache.get(cacheKey);
+  if (cached) return cached;
   
-  return new Promise((resolve, reject) => {
-    // Construct the absolute path to the Python script
-    const pythonScriptPath = path.join(__dirname, '..', 'scripts', 'showbox.py');
-    
-    // Add timeout to kill hanging Python processes
-    let timeoutId = setTimeout(() => {
-      console.log('⏱️ Python script timeout - killing process');
-      pythonProcess.kill();
-      reject(new Error('Python script execution timed out'));
-    }, 15000); // 15 second timeout
-    
-    const pythonProcess = spawn('python', [pythonScriptPath, shareUrl, token]);
-    let outputData = '';
-    let errorData = '';
+  const token = customToken || UI_TOKENS[Math.floor(Math.random() * UI_TOKENS.length)];
 
-    pythonProcess.stdout.on('data', (data) => {
-      const output = data.toString();
-      console.log('🐍 Python output:', output);
-      outputData += output;
-    });
-
-    pythonProcess.stderr.on('data', (data) => {
-      const error = data.toString();
-      console.error('⚠️ Python stderr:', error);
-      errorData += error;
-    });
-
-    pythonProcess.on('close', (code) => {
-      clearTimeout(timeoutId); // Clear the timeout when process finishes
-      if (code !== 0) {
-        console.error('❌ Python scraper error:', errorData);
-        reject(new Error(`Python scraper failed: ${errorData}`));
-        return;
-      }
-
-      try {
-        console.log('✅ Python process completed, parsing results...');
-        const results = JSON.parse(outputData);
-        resolve(results);
-      } catch (error) {
-        console.error('❌ Failed to parse Python output:', error);
-        reject(new Error('Failed to parse Python scraper output: ' + error.message));
-      }
-    });
-
-    pythonProcess.on('error', (error) => {
-      console.error('❌ Python process error:', error);
-      reject(new Error('Failed to start Python scraper: ' + error.message));
-    });
+  const playerResponse = await fetch("https://www.febbox.com/console/player", {
+    method: 'POST',
+    headers: {
+      'accept': '*/*',
+      'content-type': 'application/x-www-form-urlencoded; charset=UTF-8',
+      'x-requested-with': 'XMLHttpRequest',
+      'cookie': `ui=${token}`,
+      'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      'origin': 'https://www.febbox.com',
+      'referer': 'https://www.febbox.com/file/share'
+    },
+    body: new URLSearchParams({
+      'fid': fid,
+      'share_key': '',
+      '_token': token
+    }).toString()
   });
+
+  const playerHtml = await playerResponse.text();
+  const sourcesMatch = playerHtml.match(/var sources = (\[.*?\]);/s);
+  
+  if (!sourcesMatch) return [];
+
+  const sources = JSON.parse(sourcesMatch[1]);
+  streamLinkCache.set(cacheKey, sources);
+  return sources;
 }
 
-// Modify searchShowboxByTitle to use fetchWithTimeout and parallelize requests
+async function searchIMDB(title) {
+  const cacheKey = `imdb:${title.toLowerCase()}`;
+  const cached = imdbCache.get(cacheKey);
+  if (cached) return cached;
+
+  try {
+    const response = await fetch(`https://www.imdb.com/find/?q=${encodeURIComponent(title)}`);
+    const html = await response.text();
+    const $ = cheerio.load(html);
+    
+    const results = [];
+    $('.find-title-result').each((_, item) => {
+      const title = $(item).find('.ipc-metadata-list-summary-item__t').text().trim();
+      const yearText = $(item).find('.ipc-metadata-list-summary-item__li').first().text().trim();
+      const yearMatch = yearText.match(/(\d{4})/);
+      const year = yearMatch ? parseInt(yearMatch[1]) : null;
+      const isTV = $(item).text().toLowerCase().includes('tv series');
+      
+      if (isTV) results.push({ title, year });
+    });
+    
+    imdbCache.set(cacheKey, results);
+    return results;
+  } catch (error) {
+    console.error('❌ IMDB search failed:', error);
+    return [];
+  }
+}
+
 async function searchShowboxByTitle(title, type, year) {
-  console.log(`🔎 Searching ShowBox for: "${title}" (${year}) [${type}]`);
   const searchUrl = getScraperUrl(`https://showbox.media/search?keyword=${encodeURIComponent(title)}`);
   
   const response = await fetchWithTimeout(searchUrl);
@@ -216,17 +152,15 @@ async function searchShowboxByTitle(title, type, year) {
     const yearMatch = yearText.match(/\d{4}/);
     const itemYear = yearMatch ? parseInt(yearMatch[0]) : null;
     
-    // Extract ID from the link - handle both /detail/ and /tv/t- or /movie/m- formats
     let id = null;
     if (link) {
       const detailMatch = link.match(/\/detail\/(\d+)/);
       if (detailMatch) {
         id = detailMatch[1];
       } else {
-        // Extract ID from URL format like /tv/t-taskmaster-2015
         const urlMatch = link.match(/\/(tv|movie)\/[mt]-(.+?)-(\d+)$/);
         if (urlMatch) {
-          id = `${urlMatch[2]}-${urlMatch[3]}`;  // Create an ID from the slug
+          id = `${urlMatch[2]}-${urlMatch[3]}`;
         }
       }
     }
@@ -251,7 +185,6 @@ async function searchShowboxByTitle(title, type, year) {
   if (!match) {
     match = results.find(result => {
       const titleMatch = result.title.toLowerCase().includes(title.toLowerCase());
-      // For TV shows, be more lenient with year matching since they run multiple years
       const yearMatch = type === 'tv' ? true : (!year || !result.year || Math.abs(result.year - year) <= 2);
       return titleMatch && yearMatch;
     });
@@ -267,12 +200,10 @@ async function searchShowboxByTitle(title, type, year) {
   // If we found a match but need to get its detail page ID
   if (match && !match.id.match(/^\d+$/)) {
     try {
-      // Fetch the detail page to get the numeric ID
       const detailResponse = await fetch(getScraperUrl(match.fullUrl));
       const detailHtml = await detailResponse.text();
       const $detail = cheerio.load(detailHtml);
       
-      // Look for the ID in various places
       const watchButton = $detail('.watch-now').attr('href');
       const detailMatch = watchButton?.match(/\/detail\/(\d+)/) || 
                          detailHtml.match(/\/detail\/(\d+)/);
@@ -284,9 +215,6 @@ async function searchShowboxByTitle(title, type, year) {
       console.error('Failed to fetch detail page:', error);
     }
   }
-
-  console.log('🔍 Search results:', results.length ? results : 'No results');
-  console.log('✅ Best match:', match || 'No match found');
 
   return match;
 }
@@ -303,88 +231,6 @@ async function getFebboxShareLink(showboxId, type) {
   return data.data.link;
 }
 
-// Modify getStreamLinks to use cache
-async function getStreamLinks(fid, customToken = null) {
-  const cacheKey = `stream:${fid}`;
-  const cached = streamLinkCache.get(cacheKey);
-  if (cached) {
-    console.log(`📦 Using cached stream links for ${fid}`);
-    return cached;
-  }
-  
-  console.log(`🎯 Getting stream links for file ID: ${fid}`);
-  const token = customToken || UI_TOKENS[Math.floor(Math.random() * UI_TOKENS.length)];
-
-  const playerResponse = await fetch("https://www.febbox.com/console/player", {
-    method: 'POST',
-    headers: {
-      'accept': '*/*',
-      'content-type': 'application/x-www-form-urlencoded; charset=UTF-8',
-      'x-requested-with': 'XMLHttpRequest',
-      'cookie': `ui=${token}`,
-      'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-      'origin': 'https://www.febbox.com',
-      'referer': 'https://www.febbox.com/file/share'
-    },
-    body: new URLSearchParams({
-      'fid': fid,
-      'share_key': '',
-      '_token': token
-    }).toString()
-  });
-
-  const playerHtml = await playerResponse.text();
-  const sourcesMatch = playerHtml.match(/var sources = (\[.*?\]);/s);
-  
-  if (!sourcesMatch) {
-    console.log('⚠️ No stream sources found in player HTML');
-    return [];
-  }
-
-  const sources = JSON.parse(sourcesMatch[1]);
-  
-  // Cache the results before returning
-  streamLinkCache.set(cacheKey, sources);
-  return sources;
-}
-
-async function searchIMDB(title) {
-  // Check cache first
-  const cacheKey = `imdb:${title.toLowerCase()}`;
-  const cached = imdbCache.get(cacheKey);
-  if (cached) {
-    console.log('📦 Using cached IMDB results');
-    return cached;
-  }
-
-  try {
-    const response = await fetch(`https://www.imdb.com/find/?q=${encodeURIComponent(title)}`);
-    const html = await response.text();
-    const $ = cheerio.load(html);
-    
-    const results = [];
-    $('.find-title-result').each((_, item) => {
-      const title = $(item).find('.ipc-metadata-list-summary-item__t').text().trim();
-      const yearText = $(item).find('.ipc-metadata-list-summary-item__li').first().text().trim();
-      const yearMatch = yearText.match(/(\d{4})/);
-      const year = yearMatch ? parseInt(yearMatch[1]) : null;
-      const isTV = $(item).text().toLowerCase().includes('tv series');
-      
-      if (isTV) {
-        results.push({ title, year });
-      }
-    });
-    
-    // Cache the results
-    imdbCache.set(cacheKey, results);
-    return results;
-  } catch (error) {
-    console.error('❌ IMDB search failed:', error);
-    return [];
-  }
-}
-
-// Modify tryUrlBasedId to parallelize year attempts
 async function tryUrlBasedId(title, year, type) {
   const formattedTitle = title.toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
@@ -393,18 +239,12 @@ async function tryUrlBasedId(title, year, type) {
 
   const prefix = type === 'movie' ? 'm-' : 't-';
   
-  // Check URL cache first
   const cacheKey = `url:${type}:${formattedTitle}:${year}`;
   const cachedId = urlCache.get(cacheKey);
-  if (cachedId) {
-    console.log('📦 Using cached ShowBox ID');
-    return cachedId;
-  }
+  if (cachedId) return cachedId;
 
-  // First try with the provided year
   const url = `https://showbox.media/${type}/${prefix}${formattedTitle}-${year}`;
   
-  console.log(`🎯 Trying URL: ${url}`);
   try {
     const response = await fetch(getScraperUrl(url));
     
@@ -420,30 +260,25 @@ async function tryUrlBasedId(title, year, type) {
         const idMatch = detailUrl.match(/\/detail\/(\d+)/);
         if (idMatch) {
           urlCache.set(cacheKey, idMatch[1]);
-          console.log(`✅ Found ID via URL approach: ${idMatch[1]} (${url})`);
           return idMatch[1];
         }
       }
     }
 
-    // Only if first attempt failed, try IMDB years as fallback
-    console.log('⚠️ Initial URL attempt failed, trying IMDB fallback...');
+    // Try IMDB years as fallback
     const imdbResults = await searchIMDB(title);
     
-    // Sort years by closest to target year
     imdbResults.sort((a, b) => {
       const aDiff = Math.abs((a.year || 0) - year);
       const bDiff = Math.abs((b.year || 0) - year);
       return aDiff - bDiff;
     });
 
-    // Try multiple years in parallel instead of sequentially
     if (imdbResults && imdbResults.length > 0) {
       const yearAttempts = imdbResults
         .filter(result => result.year && result.year !== year)
         .map(async (result) => {
           const fallbackUrl = `https://showbox.media/${type}/${prefix}${formattedTitle}-${result.year}`;
-          console.log(`🎯 Trying year ${result.year}`);
           
           try {
             const fallbackResponse = await fetch(getScraperUrl(fallbackUrl));
@@ -468,12 +303,10 @@ async function tryUrlBasedId(title, year, type) {
             }
             return null;
           } catch (error) {
-            console.error(`❌ Error trying year ${result.year}:`, error);
             return null;
           }
         });
 
-      // Use Promise.allSettled instead of Promise.all to handle failures better
       const results = await Promise.allSettled(yearAttempts);
       const successfulResult = results
         .filter(r => r.status === 'fulfilled' && r.value !== null)
@@ -481,7 +314,6 @@ async function tryUrlBasedId(title, year, type) {
       
       if (successfulResult) {
         urlCache.set(cacheKey, successfulResult.id);
-        console.log(`✅ Found ID via IMDB fallback: ${successfulResult.id} (${successfulResult.url})`);
         return successfulResult.id;
       }
     }
@@ -489,7 +321,6 @@ async function tryUrlBasedId(title, year, type) {
     console.error(`❌ Error in tryUrlBasedId:`, error);
   }
   
-  console.log('⚠️ URL-based approach failed for all attempts');
   return null;
 }
 
@@ -512,59 +343,44 @@ async function fetchFebboxFiles(shareKey, parentId = 0, customToken = null) {
   return data.data.file_list;
 }
 
-// Replace the extractHighestQualityStream function with this enhanced version
 function extractTopQualityStreams(streams) {
   if (!streams) return { primary: null, secondary: null };
   
-  // For individual stream with player_streams property
   if (streams.player_streams && Array.isArray(streams.player_streams)) {
-    // Define quality priority order (highest to lowest)
     const qualityOrder = ['original', 'org', '4k', '2160p', '1080p', '720p', '480p', '360p'];
     
-    // Sort player_streams by quality
     const sortedStreams = [...streams.player_streams].sort((a, b) => {
       const aQuality = (a.quality || '').toLowerCase();
       const bQuality = (b.quality || '').toLowerCase();
       
-      // Check for original quality first
       if (aQuality.includes('original') || aQuality.includes('org')) return -1;
       if (bQuality.includes('original') || bQuality.includes('org')) return 1;
       
-      // Find the index in our priority list (lower index = higher quality)
       const aIndex = qualityOrder.findIndex(q => aQuality.includes(q));
       const bIndex = qualityOrder.findIndex(q => bQuality.includes(q));
       
-      // If quality not found in our list, give it lowest priority
       const aQualityValue = aIndex >= 0 ? aIndex : qualityOrder.length;
       const bQualityValue = bIndex >= 0 ? bIndex : qualityOrder.length;
       
       return aQualityValue - bQualityValue;
     });
     
-    const primaryStream = sortedStreams[0]?.file || null;
-    const secondaryStream = sortedStreams[1]?.file || null;
-    
     return { 
-      primary: primaryStream, 
-      secondary: secondaryStream,
+      primary: sortedStreams[0]?.file || null, 
+      secondary: sortedStreams[1]?.file || null,
       primaryQuality: sortedStreams[0]?.quality || 'Unknown',
       secondaryQuality: sortedStreams[1]?.quality || 'Unknown'
     };
   }
   
-  // For array of streams or files
   if (Array.isArray(streams)) {
-    // Check if it's an array of player_streams directly
     if (streams.length > 0 && streams[0] && 'file' in streams[0]) {
-      // Define quality priority order (highest to lowest)
       const qualityOrder = ['original', 'org', '4k', '2160p', '1080p', '720p', '480p', '360p'];
       
-      // Sort by quality
       const sortedStreams = [...streams].sort((a, b) => {
         const aQuality = (a.quality || '').toLowerCase();
         const bQuality = (b.quality || '').toLowerCase();
         
-        // Check for original quality first
         if (aQuality.includes('original') || aQuality.includes('org')) return -1;
         if (bQuality.includes('original') || bQuality.includes('org')) return 1;
         
@@ -577,30 +393,25 @@ function extractTopQualityStreams(streams) {
         return aQualityValue - bQualityValue;
       });
       
-      const primaryStream = sortedStreams[0]?.file || null;
-      const secondaryStream = sortedStreams[1]?.file || null;
-      
       return { 
-        primary: primaryStream, 
-        secondary: secondaryStream,
+        primary: sortedStreams[0]?.file || null, 
+        secondary: sortedStreams[1]?.file || null,
         primaryQuality: sortedStreams[0]?.quality || 'Unknown',
         secondaryQuality: sortedStreams[1]?.quality || 'Unknown'
       };
     }
     
-    // For array of files with individual player_streams
     const filesWithStreams = streams.filter(stream => 
       stream && stream.player_streams && Array.isArray(stream.player_streams)
     );
     
     if (filesWithStreams.length > 0) {
-      // Extract top qualities from each file
       const qualityResults = filesWithStreams
         .map(stream => extractTopQualityStreams(stream))
         .filter(result => result.primary);
       
       if (qualityResults.length > 0) {
-        return qualityResults[0];  // Return the first valid result
+        return qualityResults[0];
       }
     }
   }
@@ -608,44 +419,55 @@ function extractTopQualityStreams(streams) {
   return { primary: null, secondary: null };
 }
 
-// Replace direct upload calls with non-blocking uploads
-// Add this function at an appropriate location in the file
 function backgroundUpload(url, metadata) {
-  // Don't await this - let it run in the background
   bunnyStreamController.uploadVideoToCollection(url, metadata)
     .then(() => console.log(`✅ Background upload completed for: ${metadata.title}`))
     .catch(err => console.error(`❌ Background upload failed: ${err.message}`));
 }
 
+function hasValidStreams(data) {
+  if (data.streams) {
+    const hasPlayerStreams = data.streams.player_streams && 
+                          data.streams.player_streams.length > 0 && 
+                          data.streams.player_streams[0].file;
+          
+    const hasDirectStreams = Array.isArray(data.streams) && 
+                           data.streams.length > 0 && 
+                           data.streams[0].player_streams && 
+                           data.streams[0].player_streams.length > 0;
+          
+    return hasPlayerStreams || hasDirectStreams;
+  }
+  
+  if (data.seasons) {
+    return Object.values(data.seasons).some(episodes => 
+      Array.isArray(episodes) && 
+      episodes.length > 0 && 
+      episodes[0].player_streams && 
+      episodes[0].player_streams.length > 0
+    );
+  }
+  
+  return false;
+}
+
 export const showboxController = {
   async getShowboxUrl(req, res) {
     const { type, tmdbId } = req.params;
-    const { season, episode, py, token, skipUpload, fastMode } = req.query;
+    const { season, episode, token, skipUpload, fastMode } = req.query;
     let showboxId = null;
     let tmdbData = null;
-    const usePython = py !== undefined;
     const userToken = token || null;
     
-    if (userToken) {
-      console.log(`👤 Using user-provided UI token: ${userToken.substring(0, 10)}...`);
-    }
-
-    // Generate a unique cache key based on request parameters
-    // Include the full token to prevent sharing cached responses between different users
     const tokenIdentifier = userToken || 'default';
-    const cacheKey = `showbox:${tmdbId}:${type}${season ? `:s${season}` : ''}${episode ? `:e${episode}` : ''}:${usePython ? 'py' : 'js'}:${tokenIdentifier}`;
+    const cacheKey = `showbox:${tmdbId}:${type}${season ? `:s${season}` : ''}${episode ? `:e${episode}` : ''}:js:${tokenIdentifier}`;
     
-    // Check cache first
     const cachedResult = showboxCache.get(cacheKey);
     if (cachedResult) {
-      console.log(`✅ Cache hit for ${cacheKey}`);
-      return res.json({
-        ...cachedResult,
-        source: 'cache'
-      });
+      return res.json({...cachedResult, source: 'cache'});
     }
 
-    console.log(`\n🎬 Starting ShowBox scrape for TMDB ID: ${tmdbId} [${type}]${usePython ? ' using Python scraper' : ''}${userToken ? ' with user token' : ''}`);
+    console.log(`\n🎬 Starting ShowBox scrape for TMDB ID: ${tmdbId} [${type}]${userToken ? ' with user token' : ''}`);
     
     try {
       const tmdbResponse = await fetch(
@@ -671,125 +493,79 @@ export const showboxController = {
       const shareKey = febboxUrl.split('/share/')[1];
 
       let streamLinks = [];
-      let useJavaScript = false;
+      const files = await fetchFebboxFiles(shareKey, 0, userToken);
+      
+      if (type === 'tv') {
+        const seasons = {};
+        const seasonFolders = files.filter(file => 
+          file.is_dir === 1 && file.file_name.toLowerCase().includes('season')
+        );
 
-      if (usePython) {
-        console.log('🐍 Using Python scraper for:', febboxUrl);
-        try {
-          const pythonResults = await getPythonScrapedLinks(febboxUrl, userToken);
-          console.log('✅ Python scraper results received');
-          
-          if (!pythonResults || !Array.isArray(pythonResults)) {
-            throw new Error('Invalid Python scraper results');
-          }
+        if (season) {
+          const targetSeasonFolder = seasonFolders.find(folder => {
+            const seasonNum = parseInt(folder.file_name.match(/\d+/)?.[0] || '0', 10);
+            return seasonNum === parseInt(season, 10);
+          });
 
-          streamLinks = pythonResults.map(result => ({
-            filename: result.file_info.name,
-            quality: result.file_info.type,
-            size: result.file_info.size,
-            player_streams: Object.entries(result.quality_urls).map(([quality, url]) => ({
-              file: url,
-              quality,
-              type: 'mp4'
-            }))
-          }));
-        } catch (pythonError) {
-          console.error('❌ Python scraper failed:', pythonError);
-          useJavaScript = true;
-        }
-      } else {
-        useJavaScript = true;
-      }
-
-      if (useJavaScript) {
-        console.log('🟨 Using JavaScript scraper');
-        const files = await fetchFebboxFiles(shareKey, 0, userToken);
-        
-        if (type === 'tv') {
-          const seasons = {};
-          const seasonFolders = files.filter(file => 
-            file.is_dir === 1 && file.file_name.toLowerCase().includes('season')
-          );
-
-          // If specific season and episode are requested, only process that season
-          if (season) {
-            const targetSeasonFolder = seasonFolders.find(folder => {
-              const seasonNum = parseInt(folder.file_name.match(/\d+/)?.[0] || '0', 10);
-              return seasonNum === parseInt(season, 10);
-            });
-
-            if (targetSeasonFolder) {
-              const episodeFiles = await fetchFebboxFiles(shareKey, targetSeasonFolder.fid, userToken);
-              const seasonEpisodes = await Promise.all(episodeFiles.map(async (episodeFile) => {
-                const ext = episodeFile.file_name.split('.').pop().toLowerCase();
-                const episodeNumber = parseInt(episodeFile.file_name.match(/E(\d+)/i)?.[1] || '0', 10);
-                
-                // If specific episode is requested, only process that episode
-                if (episode && episodeNumber !== parseInt(episode, 10)) {
-                  return null;
-                }
-
-                const qualityMatch = episodeFile.file_name.match(/(1080p|720p|480p|360p|2160p|4k)/i);
-                const playerSources = await getStreamLinks(episodeFile.fid, userToken);
-
-                return {
-                  episode: episodeNumber,
-                  filename: episodeFile.file_name,
-                  quality: qualityMatch ? qualityMatch[1] : 'Unknown',
-                  type: ext,
-                  size: episodeFile.file_size,
-                  player_streams: playerSources,
-                  direct_download: `https://www.febbox.com/file/download_share?fid=${episodeFile.fid}&share_key=${shareKey}`
-                };
-              }));
-
-              // Filter out null values and only keep the requested episode
-              const filteredEpisodes = seasonEpisodes.filter(e => e !== null);
-              if (filteredEpisodes.length > 0) {
-                seasons[parseInt(season, 10)] = filteredEpisodes;
-              }
-            }
-          }
-
-          if (season && episode) {
-            const targetSeason = seasons[parseInt(season, 10)];
-            if (!targetSeason) {
-              throw new Error('Season not found');
-            }
-            
-            const targetEpisode = targetSeason.find(e => e.episode === parseInt(episode, 10));
-            if (!targetEpisode) {
-              throw new Error('Episode not found');
-            }
-            
-            const responseData = {
-              success: true,
-              tmdb_id: tmdbId,
-              type,
-              title,
-              year,
-              showbox_id: showboxId,
-              febbox_url: febboxUrl,
-              season: parseInt(season, 10),
-              episode: parseInt(episode, 10),
-              streams: targetEpisode,
-              scraper: 'javascript'
-            };
-
-            // Add type-specific data to the response
-            if (type === 'tv' && useJavaScript) {
-              // TV show seasons data
-              Object.assign(responseData, { seasons });
-            } else {
-              // Movie or general streams data
-              Object.assign(responseData, { streams: targetEpisode });
-            }
-
-            // Upload only the highest quality stream to Bunny
-            const qualityStreams = extractTopQualityStreams(targetEpisode);
-            if (!skipUpload && qualityStreams.primary) {
-              console.log(`🐰 Uploading ${type === 'movie' ? 'movie' : 'episode'}: ${title} ${type === 'tv' ? `S${season}E${episode}` : ''} [${qualityStreams.primaryQuality}]`);
+          if (targetSeasonFolder) {
+            const episodeFiles = await fetchFebboxFiles(shareKey, targetSeasonFolder.fid, userToken);
+            const seasonEpisodes = await Promise.all(episodeFiles.map(async (episodeFile) => {
+              const ext = episodeFile.file_name.split('.').pop().toLowerCase();
+              const episodeNumber = parseInt(episodeFile.file_name.match(/E(\d+)/i)?.[1] || '0', 10);
               
+              if (episode && episodeNumber !== parseInt(episode, 10)) {
+                return null;
+              }
+
+              const qualityMatch = episodeFile.file_name.match(/(1080p|720p|480p|360p|2160p|4k)/i);
+              const playerSources = await getStreamLinks(episodeFile.fid, userToken);
+
+              return {
+                episode: episodeNumber,
+                filename: episodeFile.file_name,
+                quality: qualityMatch ? qualityMatch[1] : 'Unknown',
+                type: ext,
+                size: episodeFile.file_size,
+                player_streams: playerSources,
+                direct_download: `https://www.febbox.com/file/download_share?fid=${episodeFile.fid}&share_key=${shareKey}`
+              };
+            }));
+
+            const filteredEpisodes = seasonEpisodes.filter(e => e !== null);
+            if (filteredEpisodes.length > 0) {
+              seasons[parseInt(season, 10)] = filteredEpisodes;
+            }
+          }
+        }
+
+        if (season && episode) {
+          const targetSeason = seasons[parseInt(season, 10)];
+          if (!targetSeason) {
+            throw new Error('Season not found');
+          }
+          
+          const targetEpisode = targetSeason.find(e => e.episode === parseInt(episode, 10));
+          if (!targetEpisode) {
+            throw new Error('Episode not found');
+          }
+          
+          const responseData = {
+            success: true,
+            tmdb_id: tmdbId,
+            type,
+            title,
+            year,
+            showbox_id: showboxId,
+            febbox_url: febboxUrl,
+            season: parseInt(season, 10),
+            episode: parseInt(episode, 10),
+            streams: targetEpisode,
+            seasons
+          };
+
+          if (!skipUpload) {
+            const qualityStreams = extractTopQualityStreams(targetEpisode);
+            if (qualityStreams.primary) {
               backgroundUpload(qualityStreams.primary, {
                 title: `${title}${type === 'tv' ? ` S${season}E${episode}` : ''} (TMDB: ${tmdbId})`,
                 type: 'tv',
@@ -799,184 +575,83 @@ export const showboxController = {
                 quality: qualityStreams.primaryQuality
               });
             }
-
-            // Fast response mode - send basic response before all processing is complete
-            if (fastMode && streamLinks.length > 0) {
-              // Get just the first working stream and return immediately
-              const fastResponse = {
-                success: true,
-                tmdb_id: tmdbId,
-                type,
-                title,
-                fastMode: true,
-                streams: streamLinks.slice(0, 1)
-              };
-              
-              res.json(fastResponse);
-              
-              // Continue processing in the background
-              console.log('🚀 Fast mode enabled, sending early response');
-              return;
-            }
-
-            // Helper function to check if response has valid video links
-            const hasValidStreams = (data) => {
-              // For movies or TV episode requests with direct streams
-              if (data.streams) {
-                const hasPlayerStreams = data.streams.player_streams && 
-                                      data.streams.player_streams.length > 0 && 
-                                      data.streams.player_streams[0].file;
-                  
-                const hasDirectStreams = Array.isArray(data.streams) && 
-                                       data.streams.length > 0 && 
-                                       data.streams[0].player_streams && 
-                                       data.streams[0].player_streams.length > 0;
-                  
-                return hasPlayerStreams || hasDirectStreams;
-              }
-              
-              // For TV shows with seasons data
-              if (data.seasons) {
-                // Check if any season has episodes with streams
-                return Object.values(data.seasons).some(episodes => 
-                  Array.isArray(episodes) && 
-                  episodes.length > 0 && 
-                  episodes[0].player_streams && 
-                  episodes[0].player_streams.length > 0
-                );
-              }
-              
-              return false;
-            };
-
-            // Only cache responses that have valid video links
-            if (hasValidStreams(responseData)) {
-              console.log('✅ Response contains valid streams, caching result');
-              showboxCache.set(cacheKey, responseData);
-            } else {
-              console.log('⚠️ Response does not contain valid streams, not caching');
-            }
-
-            return res.json(responseData);
           }
 
-          const responseData = {
-            success: true,
-            tmdb_id: tmdbId,
-            type,
-            title,
-            year,
-            showbox_id: showboxId,
-            febbox_url: febboxUrl,
-            seasons,
-            scraper: 'javascript'
-          };
-
-          // Add type-specific data to the response
-          if (type === 'tv' && useJavaScript) {
-            // TV show seasons data
-            Object.assign(responseData, { seasons });
-          } else {
-            // Movie or general streams data
-            Object.assign(responseData, { streams: seasons[1] });
+          if (fastMode && streamLinks.length > 0) {
+            return res.json({
+              success: true,
+              tmdb_id: tmdbId,
+              type,
+              title,
+              fastMode: true,
+              streams: streamLinks.slice(0, 1)
+            });
           }
 
-          // Upload only the highest quality stream to Bunny for movies
-          if (type === 'movie') {
-            console.log('Attempting to upload movie to Bunny Stream...');
-            
-            // Debug the streamLinks structure
-            console.log(`Stream links structure: ${typeof seasons[1]}`);
-            console.log(`Stream links is array: ${Array.isArray(seasons[1])}`);
-            console.log(`Stream links length: ${seasons[1]?.length || 'N/A'}`);
-            
-            if (seasons[1] && seasons[1].length > 0) {
-              console.log('Sample stream link structure:', JSON.stringify(seasons[1][0], null, 2));
-            }
-            
-            const qualityStreams = extractTopQualityStreams(seasons[1]);
-            
-            console.log(`Highest quality URLs found: Primary=${qualityStreams.primary || 'None'}, Secondary=${qualityStreams.secondary || 'None'}`);
-            
-            if (!skipUpload && qualityStreams.primary) {
-              console.log(`🐰 Uploading ${type === 'movie' ? 'movie' : 'episode'}: ${title} ${type === 'tv' ? `S${season}E${episode}` : ''} [${qualityStreams.primaryQuality}]`);
-              
-              backgroundUpload(qualityStreams.primary, {
-                title: `${title} (TMDB: ${tmdbId})`,
-                type: 'movie',
-                tmdbId,
-                quality: qualityStreams.primaryQuality
-              });
-            }
-          }
-
-          // Helper function to check if response has valid video links
-          const hasValidStreams = (data) => {
-            // For movies or TV episode requests with direct streams
-            if (data.streams) {
-              const hasPlayerStreams = data.streams.player_streams && 
-                                    data.streams.player_streams.length > 0 && 
-                                    data.streams.player_streams[0].file;
-                  
-              const hasDirectStreams = Array.isArray(data.streams) && 
-                                     data.streams.length > 0 && 
-                                     data.streams[0].player_streams && 
-                                     data.streams[0].player_streams.length > 0;
-                  
-              return hasPlayerStreams || hasDirectStreams;
-            }
-            
-            // For TV shows with seasons data
-            if (data.seasons) {
-              // Check if any season has episodes with streams
-              return Object.values(data.seasons).some(episodes => 
-                Array.isArray(episodes) && 
-                episodes.length > 0 && 
-                episodes[0].player_streams && 
-                episodes[0].player_streams.length > 0
-              );
-            }
-            
-            return false;
-          };
-
-          // Only cache responses that have valid video links
           if (hasValidStreams(responseData)) {
-            console.log('✅ Response contains valid streams, caching result');
             showboxCache.set(cacheKey, responseData);
-          } else {
-            console.log('⚠️ Response does not contain valid streams, not caching');
           }
 
           return res.json(responseData);
-        } else {
-          // Handle movies
-          const videoFiles = files.filter(file => file.is_dir === 0);
-          streamLinks = await Promise.all(videoFiles.map(async (file) => {
-            const ext = file.file_name.split('.').pop().toLowerCase();
-            const qualityMatch = file.file_name.match(/(1080p|720p|480p|360p|2160p|4k)/i);
-            const playerSources = await getStreamLinks(file.fid, userToken);
-            
-            return {
-              filename: file.file_name,
-              quality: qualityMatch ? qualityMatch[1] : 'Unknown',
-              type: ext,
-              size: file.file_size,
-              player_streams: playerSources,
-              direct_download: `https://www.febbox.com/file/download_share?fid=${file.fid}&share_key=${shareKey}`
-            };
-          }));
         }
+
+        const responseData = {
+          success: true,
+          tmdb_id: tmdbId,
+          type,
+          title,
+          year,
+          showbox_id: showboxId,
+          febbox_url: febboxUrl,
+          seasons
+        };
+
+        if (type === 'movie') {
+          const qualityStreams = extractTopQualityStreams(seasons[1]);
+          
+          if (!skipUpload && qualityStreams.primary) {
+            backgroundUpload(qualityStreams.primary, {
+              title: `${title} (TMDB: ${tmdbId})`,
+              type: 'movie',
+              tmdbId,
+              quality: qualityStreams.primaryQuality
+            });
+          }
+        }
+
+        if (hasValidStreams(responseData)) {
+          showboxCache.set(cacheKey, responseData);
+        }
+
+        return res.json(responseData);
+        
+      } else {
+        // Handle movies
+        const videoFiles = files.filter(file => file.is_dir === 0);
+        streamLinks = await Promise.all(videoFiles.map(async (file) => {
+          const ext = file.file_name.split('.').pop().toLowerCase();
+          const qualityMatch = file.file_name.match(/(1080p|720p|480p|360p|2160p|4k)/i);
+          const playerSources = await getStreamLinks(file.fid, userToken);
+          
+          return {
+            filename: file.file_name,
+            quality: qualityMatch ? qualityMatch[1] : 'Unknown',
+            type: ext,
+            size: file.file_size,
+            player_streams: playerSources,
+            direct_download: `https://www.febbox.com/file/download_share?fid=${file.fid}&share_key=${shareKey}`
+          };
+        }));
       }
 
-      // Return results
+      // Return results for TV episode
       if (type === 'tv' && season && episode && streamLinks.length > 0) {
         const targetEpisode = streamLinks.find(link => {
           const seasonMatch = link.filename.match(/S(\d+)/i);
           const episodeMatch = link.filename.match(/E(\d+)/i);
           return seasonMatch && episodeMatch && 
-                 parseInt(seasonMatch[1]) === parseInt(season) &&
-                 parseInt(episodeMatch[1]) === parseInt(episode);
+                parseInt(seasonMatch[1]) === parseInt(season) &&
+                parseInt(episodeMatch[1]) === parseInt(episode);
         });
 
         if (!targetEpisode) {
@@ -993,24 +668,12 @@ export const showboxController = {
           febbox_url: febboxUrl,
           season: parseInt(season),
           episode: parseInt(episode),
-          streams: targetEpisode,
-          scraper: usePython ? 'python' : 'javascript'
+          streams: targetEpisode
         };
 
-        // Add type-specific data to the response
-        if (type === 'tv' && useJavaScript) {
-          // TV show seasons data
-          Object.assign(responseData, { seasons });
-        } else {
-          // Movie or general streams data
-          Object.assign(responseData, { streams: targetEpisode });
-        }
-
-        // Upload only the highest quality stream to Bunny
+        // Upload high quality stream to Bunny
         const qualityStreams = extractTopQualityStreams(targetEpisode);
         if (!skipUpload && qualityStreams.primary) {
-          console.log(`🐰 Uploading ${type === 'movie' ? 'movie' : 'episode'}: ${title} ${type === 'tv' ? `S${season}E${episode}` : ''} [${qualityStreams.primaryQuality}]`);
-          
           backgroundUpload(qualityStreams.primary, {
             title: `${title}${type === 'tv' ? ` S${season}E${episode}` : ''} (TMDB: ${tmdbId})`,
             type: 'tv',
@@ -1021,66 +684,26 @@ export const showboxController = {
           });
         }
 
-        // Fast response mode - send basic response before all processing is complete
+        // Fast mode response
         if (fastMode && streamLinks.length > 0) {
-          // Get just the first working stream and return immediately
-          const fastResponse = {
+          return res.json({
             success: true,
             tmdb_id: tmdbId,
             type,
             title,
             fastMode: true,
             streams: streamLinks.slice(0, 1)
-          };
-          
-          res.json(fastResponse);
-          
-          // Continue processing in the background
-          console.log('🚀 Fast mode enabled, sending early response');
-          return;
+          });
         }
 
-        // Helper function to check if response has valid video links
-        const hasValidStreams = (data) => {
-          // For movies or TV episode requests with direct streams
-          if (data.streams) {
-            const hasPlayerStreams = data.streams.player_streams && 
-                                  data.streams.player_streams.length > 0 && 
-                                  data.streams.player_streams[0].file;
-              
-            const hasDirectStreams = Array.isArray(data.streams) && 
-                                   data.streams.length > 0 && 
-                                   data.streams[0].player_streams && 
-                                   data.streams[0].player_streams.length > 0;
-              
-            return hasPlayerStreams || hasDirectStreams;
-          }
-          
-          // For TV shows with seasons data
-          if (data.seasons) {
-            // Check if any season has episodes with streams
-            return Object.values(data.seasons).some(episodes => 
-              Array.isArray(episodes) && 
-              episodes.length > 0 && 
-              episodes[0].player_streams && 
-              episodes[0].player_streams.length > 0
-            );
-          }
-          
-          return false;
-        };
-
-        // Only cache responses that have valid video links
         if (hasValidStreams(responseData)) {
-          console.log('✅ Response contains valid streams, caching result');
           showboxCache.set(cacheKey, responseData);
-        } else {
-          console.log('⚠️ Response does not contain valid streams, not caching');
         }
 
         return res.json(responseData);
       }
 
+      // General response for other cases
       const responseData = {
         success: true,
         tmdb_id: tmdbId,
@@ -1089,39 +712,14 @@ export const showboxController = {
         year,
         showbox_id: showboxId,
         febbox_url: febboxUrl,
-        streams: streamLinks,
-        scraper: usePython ? 'python' : 'javascript'
+        streams: streamLinks
       };
 
-      // Add type-specific data to the response
-      if (type === 'tv' && useJavaScript) {
-        // TV show seasons data
-        Object.assign(responseData, { seasons });
-      } else {
-        // Movie or general streams data
-        Object.assign(responseData, { streams: streamLinks });
-      }
-
-      // Upload only the highest quality stream to Bunny for movies
+      // Upload movie to Bunny CDN
       if (type === 'movie') {
-        console.log('Attempting to upload movie to Bunny Stream...');
-        
-        // Debug the streamLinks structure
-        console.log(`Stream links structure: ${typeof streamLinks}`);
-        console.log(`Stream links is array: ${Array.isArray(streamLinks)}`);
-        console.log(`Stream links length: ${streamLinks?.length || 'N/A'}`);
-        
-        if (streamLinks && streamLinks.length > 0) {
-          console.log('Sample stream link structure:', JSON.stringify(streamLinks[0], null, 2));
-        }
-        
         const qualityStreams = extractTopQualityStreams(streamLinks);
         
-        console.log(`Highest quality URLs found: Primary=${qualityStreams.primary || 'None'}, Secondary=${qualityStreams.secondary || 'None'}`);
-        
         if (!skipUpload && qualityStreams.primary) {
-          console.log(`🐰 Uploading ${type === 'movie' ? 'movie' : 'episode'}: ${title} ${type === 'tv' ? `S${season}E${episode}` : ''} [${qualityStreams.primaryQuality}]`);
-          
           backgroundUpload(qualityStreams.primary, {
             title: `${title} (TMDB: ${tmdbId})`,
             type: 'movie',
@@ -1131,42 +729,8 @@ export const showboxController = {
         }
       }
 
-      // Helper function to check if response has valid video links
-      const hasValidStreams = (data) => {
-        // For movies or TV episode requests with direct streams
-        if (data.streams) {
-          const hasPlayerStreams = data.streams.player_streams && 
-                                data.streams.player_streams.length > 0 && 
-                                data.streams.player_streams[0].file;
-          
-          const hasDirectStreams = Array.isArray(data.streams) && 
-                                 data.streams.length > 0 && 
-                                 data.streams[0].player_streams && 
-                                 data.streams[0].player_streams.length > 0;
-          
-          return hasPlayerStreams || hasDirectStreams;
-        }
-        
-        // For TV shows with seasons data
-        if (data.seasons) {
-          // Check if any season has episodes with streams
-          return Object.values(data.seasons).some(episodes => 
-            Array.isArray(episodes) && 
-            episodes.length > 0 && 
-            episodes[0].player_streams && 
-            episodes[0].player_streams.length > 0
-          );
-        }
-        
-        return false;
-      };
-
-      // Only cache responses that have valid video links
       if (hasValidStreams(responseData)) {
-        console.log('✅ Response contains valid streams, caching result');
         showboxCache.set(cacheKey, responseData);
-      } else {
-        console.log('⚠️ Response does not contain valid streams, not caching');
       }
 
       return res.json(responseData);
@@ -1174,30 +738,22 @@ export const showboxController = {
     } catch (error) {
       console.error('❌ ShowBox scraping failed:', {
         error: error.message,
-        stack: error.stack,
         tmdbId,
         type,
         showboxId,
-        title: tmdbData?.title || tmdbData?.name || 'Unknown',
-        year: tmdbData?.release_date || tmdbData?.first_air_date || 'Unknown',
-        scraper: usePython ? 'python' : 'javascript'
+        title: tmdbData?.title || tmdbData?.name || 'Unknown'
       });
       
-      // Don't cache errors
       return res.status(500).json({
         success: false,
         error: error.message,
         tmdb_id: tmdbId,
         type,
-        showbox_id: showboxId,
-        scraper: usePython ? 'python' : 'javascript'
+        showbox_id: showboxId
       });
     }
   },
 
-  /**
-   * Utility method to clear the cache (can be exposed as an endpoint if needed)
-   */
   clearCache(req, res) {
     const cleared = showboxCache.flushAll();
     return res.json({
@@ -1207,9 +763,6 @@ export const showboxController = {
     });
   },
   
-  /**
-   * List all videos in Bunny CDN
-   */
   async listBunnyVideos(req, res) {
     try {
       await bunnyStreamController.initialize();

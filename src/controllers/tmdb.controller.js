@@ -7,7 +7,7 @@ const TMDB_API_KEY = 'b29bfe548cc2a3e4225effbd54ef0fda';
 const TMDB_BASE_URL = 'https://api.themoviedb.org/3';
 const POSTER_BASE_URL = 'https://image.tmdb.org/t/p/w200';
 const BACKDROP_BASE_URL = 'https://image.tmdb.org/t/p/original';
-const CACHE_TTL = 60 * 60; // 1 hour in seconds
+const CACHE_TTL = 60 * 60;
 
 async function getCachedData(key, fetchFunction) {
   const cachedData = cache.get(key);

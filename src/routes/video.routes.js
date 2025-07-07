@@ -30,6 +30,7 @@ router.get('/random-backdrops', tmdbController.getRandomBackdrops);
 router.get('/scrape/movie/:tmdb_id', scraperController.scrapeMovieLinks);
 router.get('/scrape/series/:tmdb_id', seriesScraperController.scrapeSeriesLinks);
 router.get('/parental-rating/:type/:title', parentalRatingController.getParentalRating);
+// ShowBox scraper route - supports ?new parameter to bypass cache
 router.get('/showbox/:type/:tmdbId', showboxController.getShowboxUrl);
 
 // New showbox-related routes

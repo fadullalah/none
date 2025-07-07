@@ -454,7 +454,7 @@ function hasValidStreams(data) {
 export const showboxController = {
   async getShowboxUrl(req, res) {
     const { type, tmdbId } = req.params;
-    const { season, episode, token, skipUpload, fastMode } = req.query;
+    const { season, episode, token, skipUpload, fastMode, new: newRequest } = req.query;
     let showboxId = null;
     let tmdbData = null;
     const userToken = token || null;
@@ -462,12 +462,15 @@ export const showboxController = {
     const tokenIdentifier = userToken || 'default';
     const cacheKey = `showbox:${tmdbId}:${type}${season ? `:s${season}` : ''}${episode ? `:e${episode}` : ''}:js:${tokenIdentifier}`;
     
-    const cachedResult = showboxCache.get(cacheKey);
-    if (cachedResult) {
-      return res.json({...cachedResult, source: 'cache'});
+    // Skip cache if ?new parameter is present
+    if (!newRequest) {
+      const cachedResult = showboxCache.get(cacheKey);
+      if (cachedResult) {
+        return res.json({...cachedResult, source: 'cache'});
+      }
     }
 
-    console.log(`\n🎬 Starting ShowBox scrape for TMDB ID: ${tmdbId} [${type}]${userToken ? ' with user token' : ''}`);
+    console.log(`\n🎬 Starting ShowBox scrape for TMDB ID: ${tmdbId} [${type}]${userToken ? ' with user token' : ''}${newRequest ? ' (NEW REQUEST - bypassing cache)' : ''}`);
     
     try {
       const tmdbResponse = await fetch(

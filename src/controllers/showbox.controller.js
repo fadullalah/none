@@ -13,7 +13,7 @@ const __dirname = dirname(__filename);
 // Caches
 const showboxCache = new NodeCache({ stdTTL: 43200 }); // 12 hours
 const imdbCache = new NodeCache({ stdTTL: 172800 }); // 48 hours
-const urlCache = new NodeCache({ stdTTL: 86400 }); // 24 hours
+const urlCache = new NodeCache({ stdTTL: 43200 }); // 12 hours
 const streamLinkCache = new NodeCache({ stdTTL: 3600 }); // 1 hour
 
 // Constants

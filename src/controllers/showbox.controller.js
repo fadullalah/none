@@ -164,7 +164,8 @@ async function searchShowboxByTitle(title, type, year) {
         }
       }
     }
-    
+    // Debug: print each found title
+    console.log('[ShowboxSearch] Found title:', itemTitle, '| Link:', link);
     return { 
       title: itemTitle, 
       year: itemYear, 
@@ -173,6 +174,7 @@ async function searchShowboxByTitle(title, type, year) {
       fullUrl: `https://showbox.media${link}`
     };
   }).get();
+  console.log(`[ShowboxSearch] Total .flw-item results:`, results.length);
 
   // First try exact match
   let match = results.find(result => {
@@ -197,17 +199,40 @@ async function searchShowboxByTitle(title, type, year) {
     );
   }
 
+  // Fallback: search for <a> with title attribute matching the search title (case-insensitive)
+  if (!match) {
+    console.log('[ShowboxSearch] Fallback triggered for title:', title);
+    // Find all .flw-item elements
+    $('.flw-item').each((_, item) => {
+      // Find <a> with class 'film-poster-ahref' and a title attribute
+      const aTag = $(item).find('a.film-poster-ahref[title]');
+      const aTitle = aTag.attr('title');
+      if (aTitle && aTitle.trim().toLowerCase() === title.trim().toLowerCase()) {
+        const link = aTag.attr('href');
+        // Also get the visible title from .film-name if possible
+        const itemTitle = $(item).find('.film-name').text().trim() || aTitle.trim();
+        console.log('[ShowboxSearch] Fallback matched:', itemTitle, '| Link:', link);
+        match = {
+          title: itemTitle,
+          year: null, // year extraction could be added if needed
+          link,
+          id: null,
+          fullUrl: link ? `https://showbox.media${link}` : null
+        };
+        return false; // break out of .each
+      }
+    });
+  }
+
   // If we found a match but need to get its detail page ID
-  if (match && !match.id.match(/^\d+$/)) {
+  if (match && match.link && (!match.id || !match.id.match(/^[0-9]+$/))) {
     try {
       const detailResponse = await fetch(getScraperUrl(match.fullUrl));
       const detailHtml = await detailResponse.text();
       const $detail = cheerio.load(detailHtml);
-      
       const watchButton = $detail('.watch-now').attr('href');
       const detailMatch = watchButton?.match(/\/detail\/(\d+)/) || 
                          detailHtml.match(/\/detail\/(\d+)/);
-      
       if (detailMatch) {
         match.id = detailMatch[1];
       }

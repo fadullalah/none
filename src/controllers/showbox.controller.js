@@ -363,21 +363,38 @@ async function tryUrlBasedId(title, year, type) {
 
 async function fetchFebboxFiles(shareKey, parentId = 0, customToken = null) {
   const token = customToken || UI_TOKENS[Math.floor(Math.random() * UI_TOKENS.length)];
-  const fileListUrl = `https://www.febbox.com/file/file_share_list?share_key=${shareKey}&parent_id=${parentId}`;
+  const allFiles = [];
+  let page = 1;
+  let hasMorePages = true;
   
-  const response = await fetch(fileListUrl, {
-    headers: {
-      'cookie': `ui=${token}`,
-      'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+  while (hasMorePages) {
+    const fileListUrl = `https://www.febbox.com/file/file_share_list?page=${page}&share_key=${shareKey}&pwd=&parent_id=${parentId}`;
+    
+    const response = await fetch(fileListUrl, {
+      headers: {
+        'cookie': `ui=${token}`,
+        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+      }
+    });
+    
+    const data = await response.json();
+    
+    if (!data?.data?.file_list) {
+      throw new Error('Failed to fetch Febbox files');
     }
-  });
-  const data = await response.json();
-  
-  if (!data?.data?.file_list) {
-    throw new Error('Failed to fetch Febbox files');
+    
+    const files = data.data.file_list;
+    allFiles.push(...files);
+    
+    // Check if there are more pages (if we get fewer files than expected, we're done)
+    if (files.length === 0 || files.length < 20) { // Assuming 20 files per page
+      hasMorePages = false;
+    } else {
+      page++;
+    }
   }
   
-  return data.data.file_list;
+  return allFiles;
 }
 
 function extractTopQualityStreams(streams) {
@@ -537,9 +554,17 @@ export const showboxController = {
       
       if (type === 'tv') {
         const seasons = {};
-        const seasonFolders = files.filter(file => 
-          file.is_dir === 1 && file.file_name.toLowerCase().includes('season')
-        );
+        
+        // More flexible season folder detection
+        const seasonFolders = files.filter(file => {
+          if (file.is_dir !== 1) return false;
+          const fileName = file.file_name.toLowerCase();
+          return fileName.includes('season') || 
+                 fileName.includes('s') || 
+                 /^\d+$/.test(fileName) || // Just numbers
+                 /^season\s*\d+/i.test(fileName) || // Season 1, Season 2, etc.
+                 /^s\d+/i.test(fileName); // S1, S2, etc.
+        });
 
         if (season) {
           const targetSeasonFolder = seasonFolders.find(folder => {
@@ -549,9 +574,11 @@ export const showboxController = {
 
           if (targetSeasonFolder) {
             const episodeFiles = await fetchFebboxFiles(shareKey, targetSeasonFolder.fid, userToken);
+            
             const seasonEpisodes = await Promise.all(episodeFiles.map(async (episodeFile) => {
               const ext = episodeFile.file_name.split('.').pop().toLowerCase();
-              const episodeNumber = parseInt(episodeFile.file_name.match(/E(\d+)/i)?.[1] || '0', 10);
+              const episodeMatch = episodeFile.file_name.match(/E(\d+)/i);
+              const episodeNumber = parseInt(episodeMatch?.[1] || '0', 10);
               
               if (episode && episodeNumber !== parseInt(episode, 10)) {
                 return null;
@@ -572,8 +599,46 @@ export const showboxController = {
             }));
 
             const filteredEpisodes = seasonEpisodes.filter(e => e !== null);
+            
             if (filteredEpisodes.length > 0) {
               seasons[parseInt(season, 10)] = filteredEpisodes;
+            }
+          } else {
+            // Fallback: If no season folder found, try to find episodes in root directory
+            const videoFiles = files.filter(file => file.is_dir === 0);
+            const episodeFiles = videoFiles.filter(file => {
+              const fileName = file.file_name.toLowerCase();
+              const seasonMatch = fileName.match(/s(\d+)/i);
+              return seasonMatch && parseInt(seasonMatch[1]) === parseInt(season, 10);
+            });
+            
+            if (episodeFiles.length > 0) {
+              const seasonEpisodes = await Promise.all(episodeFiles.map(async (episodeFile) => {
+                const ext = episodeFile.file_name.split('.').pop().toLowerCase();
+                const episodeNumber = parseInt(episodeFile.file_name.match(/E(\d+)/i)?.[1] || '0', 10);
+                
+                if (episode && episodeNumber !== parseInt(episode, 10)) {
+                  return null;
+                }
+
+                const qualityMatch = episodeFile.file_name.match(/(1080p|720p|480p|360p|2160p|4k)/i);
+                const playerSources = await getStreamLinks(episodeFile.fid, userToken);
+
+                return {
+                  episode: episodeNumber,
+                  filename: episodeFile.file_name,
+                  quality: qualityMatch ? qualityMatch[1] : 'Unknown',
+                  type: ext,
+                  size: episodeFile.file_size,
+                  player_streams: playerSources,
+                  direct_download: `https://www.febbox.com/file/download_share?fid=${episodeFile.fid}&share_key=${shareKey}`
+                };
+              }));
+
+              const filteredEpisodes = seasonEpisodes.filter(e => e !== null);
+              if (filteredEpisodes.length > 0) {
+                seasons[parseInt(season, 10)] = filteredEpisodes;
+              }
             }
           }
         }
@@ -581,7 +646,7 @@ export const showboxController = {
         if (season && episode) {
           const targetSeason = seasons[parseInt(season, 10)];
           if (!targetSeason) {
-            throw new Error('Season not found');
+            throw new Error(`Season ${season} not found. Available seasons: ${Object.keys(seasons).join(', ')}`);
           }
           
           const targetEpisode = targetSeason.find(e => e.episode === parseInt(episode, 10));
@@ -633,6 +698,41 @@ export const showboxController = {
           }
 
           return res.json(responseData);
+        }
+
+        // If no season specified but we have season folders, populate all seasons
+        if (!season && seasonFolders.length > 0) {
+          for (const folder of seasonFolders) {
+            const seasonNum = parseInt(folder.file_name.match(/\d+/)?.[0] || '0', 10);
+            if (seasonNum > 0) {
+              try {
+                const episodeFiles = await fetchFebboxFiles(shareKey, folder.fid, userToken);
+                const seasonEpisodes = await Promise.all(episodeFiles.map(async (episodeFile) => {
+                  const ext = episodeFile.file_name.split('.').pop().toLowerCase();
+                  const episodeNumber = parseInt(episodeFile.file_name.match(/E(\d+)/i)?.[1] || '0', 10);
+                  const qualityMatch = episodeFile.file_name.match(/(1080p|720p|480p|360p|2160p|4k)/i);
+                  const playerSources = await getStreamLinks(episodeFile.fid, userToken);
+
+                  return {
+                    episode: episodeNumber,
+                    filename: episodeFile.file_name,
+                    quality: qualityMatch ? qualityMatch[1] : 'Unknown',
+                    type: ext,
+                    size: episodeFile.file_size,
+                    player_streams: playerSources,
+                    direct_download: `https://www.febbox.com/file/download_share?fid=${episodeFile.fid}&share_key=${shareKey}`
+                  };
+                }));
+
+                const filteredEpisodes = seasonEpisodes.filter(e => e !== null);
+                if (filteredEpisodes.length > 0) {
+                  seasons[seasonNum] = filteredEpisodes;
+                }
+              } catch (error) {
+                console.error(`Error processing season ${seasonNum}:`, error.message);
+              }
+            }
+          }
         }
 
         const responseData = {

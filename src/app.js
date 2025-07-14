@@ -23,6 +23,7 @@ app.use(cors({
     'https://new-test-player-nunflix.vercel.app',
     'https://nunflix.org',
     'https://nunflix.vercel.app',
+    'http://192.168.100.168:5173',
     'https://nunflix.app',
     'https://nunflix-ey9.pages.dev',
     'https://com.nunflix.app'

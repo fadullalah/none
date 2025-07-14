@@ -4,7 +4,6 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
 import NodeCache from 'node-cache';
-import { bunnyStreamController } from './bunny.controller.js';
 
 // Get directory name
 const __filename = fileURLToPath(import.meta.url);
@@ -74,39 +73,49 @@ function getScraperUrl(url) {
   return `http://api.scraperapi.com?api_key=${SCRAPER_API_KEY}&url=${encodeURIComponent(url)}`;
 }
 
-async function getStreamLinks(fid, customToken = null) {
+async function getStreamLinks(fid, customToken = null, shareKey = null) {
   const cacheKey = `stream:${fid}`;
   const cached = streamLinkCache.get(cacheKey);
   if (cached) return cached;
   
   const token = customToken || UI_TOKENS[Math.floor(Math.random() * UI_TOKENS.length)];
 
-  const playerResponse = await fetch("https://www.febbox.com/console/player", {
-    method: 'POST',
-    headers: {
-      'accept': '*/*',
-      'content-type': 'application/x-www-form-urlencoded; charset=UTF-8',
-      'x-requested-with': 'XMLHttpRequest',
-      'cookie': `ui=${token}`,
-      'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-      'origin': 'https://www.febbox.com',
-      'referer': 'https://www.febbox.com/file/share'
-    },
-    body: new URLSearchParams({
-      'fid': fid,
-      'share_key': '',
-      '_token': token
-    }).toString()
-  });
+  try {
+    const playerResponse = await fetch("https://www.febbox.com/console/player", {
+      method: 'POST',
+      headers: {
+        'accept': '*/*',
+        'content-type': 'application/x-www-form-urlencoded; charset=UTF-8',
+        'x-requested-with': 'XMLHttpRequest',
+        'cookie': `ui=${token}`,
+        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'origin': 'https://www.febbox.com',
+        'referer': 'https://www.febbox.com/file/share'
+      },
+      body: new URLSearchParams({
+        'fid': fid,
+        'share_key': shareKey || '',
+        '_token': token
+      }).toString()
+    });
 
-  const playerHtml = await playerResponse.text();
-  const sourcesMatch = playerHtml.match(/var sources = (\[.*?\]);/s);
-  
-  if (!sourcesMatch) return [];
+    if (!playerResponse.ok) {
+      return [];
+    }
 
-  const sources = JSON.parse(sourcesMatch[1]);
-  streamLinkCache.set(cacheKey, sources);
-  return sources;
+    const playerHtml = await playerResponse.text();
+    const sourcesMatch = playerHtml.match(/var sources = (\[.*?\]);/s);
+    
+    if (!sourcesMatch) {
+      return [];
+    }
+
+    const sources = JSON.parse(sourcesMatch[1]);
+    streamLinkCache.set(cacheKey, sources);
+    return sources;
+  } catch (error) {
+    return [];
+  }
 }
 
 async function searchIMDB(title) {
@@ -164,8 +173,6 @@ async function searchShowboxByTitle(title, type, year) {
         }
       }
     }
-    // Debug: print each found title
-    console.log('[ShowboxSearch] Found title:', itemTitle, '| Link:', link);
     return { 
       title: itemTitle, 
       year: itemYear, 
@@ -174,7 +181,6 @@ async function searchShowboxByTitle(title, type, year) {
       fullUrl: `https://showbox.media${link}`
     };
   }).get();
-  console.log(`[ShowboxSearch] Total .flw-item results:`, results.length);
 
   // First try exact match
   let match = results.find(result => {
@@ -201,7 +207,6 @@ async function searchShowboxByTitle(title, type, year) {
 
   // Fallback: search for <a> with title attribute matching the search title (case-insensitive)
   if (!match) {
-    console.log('[ShowboxSearch] Fallback triggered for title:', title);
     // Find all .flw-item elements
     $('.flw-item').each((_, item) => {
       // Find <a> with class 'film-poster-ahref' and a title attribute
@@ -211,7 +216,6 @@ async function searchShowboxByTitle(title, type, year) {
         const link = aTag.attr('href');
         // Also get the visible title from .film-name if possible
         const itemTitle = $(item).find('.film-name').text().trim() || aTitle.trim();
-        console.log('[ShowboxSearch] Fallback matched:', itemTitle, '| Link:', link);
         match = {
           title: itemTitle,
           year: null, // year extraction could be added if needed
@@ -226,7 +230,6 @@ async function searchShowboxByTitle(title, type, year) {
 
   // Special condition for Squid Game
   if (!match && title.toLowerCase() === 'squid game') {
-    console.log('[ShowboxSearch] Special condition for Squid Game triggered');
     match = {
       title: 'Squid Game',
       year: 2021,
@@ -473,11 +476,7 @@ function extractTopQualityStreams(streams) {
   return { primary: null, secondary: null };
 }
 
-function backgroundUpload(url, metadata) {
-  bunnyStreamController.uploadVideoToCollection(url, metadata)
-    .then(() => console.log(`✅ Background upload completed for: ${metadata.title}`))
-    .catch(err => console.error(`❌ Background upload failed: ${err.message}`));
-}
+
 
 function hasValidStreams(data) {
   if (data.streams) {
@@ -508,7 +507,7 @@ function hasValidStreams(data) {
 export const showboxController = {
   async getShowboxUrl(req, res) {
     const { type, tmdbId } = req.params;
-    const { season, episode, token, skipUpload, fastMode, new: newRequest } = req.query;
+    const { season, episode, token, fastMode } = req.query;
     let showboxId = null;
     let tmdbData = null;
     const userToken = token || null;
@@ -516,15 +515,13 @@ export const showboxController = {
     const tokenIdentifier = userToken || 'default';
     const cacheKey = `showbox:${tmdbId}:${type}${season ? `:s${season}` : ''}${episode ? `:e${episode}` : ''}:js:${tokenIdentifier}`;
     
-    // Skip cache if ?new parameter is present
-    if (!newRequest) {
-      const cachedResult = showboxCache.get(cacheKey);
-      if (cachedResult) {
-        return res.json({...cachedResult, source: 'cache'});
-      }
+    // Check cache first
+    const cachedResult = showboxCache.get(cacheKey);
+    if (cachedResult) {
+      return res.json({...cachedResult, source: 'cache'});
     }
 
-    console.log(`\n🎬 Starting ShowBox scrape for TMDB ID: ${tmdbId} [${type}]${userToken ? ' with user token' : ''}${newRequest ? ' (NEW REQUEST - bypassing cache)' : ''}`);
+    console.log(`\n🎬 Starting ShowBox scrape for TMDB ID: ${tmdbId} [${type}]${userToken ? ' with user token' : ''}`);
     
     try {
       const tmdbResponse = await fetch(
@@ -585,7 +582,7 @@ export const showboxController = {
               }
 
               const qualityMatch = episodeFile.file_name.match(/(1080p|720p|480p|360p|2160p|4k)/i);
-              const playerSources = await getStreamLinks(episodeFile.fid, userToken);
+              const playerSources = await getStreamLinks(episodeFile.fid, userToken, shareKey);
 
               return {
                 episode: episodeNumber,
@@ -622,7 +619,7 @@ export const showboxController = {
                 }
 
                 const qualityMatch = episodeFile.file_name.match(/(1080p|720p|480p|360p|2160p|4k)/i);
-                const playerSources = await getStreamLinks(episodeFile.fid, userToken);
+                const playerSources = await getStreamLinks(episodeFile.fid, userToken, shareKey);
 
                 return {
                   episode: episodeNumber,
@@ -668,19 +665,7 @@ export const showboxController = {
             seasons
           };
 
-          if (!skipUpload) {
-            const qualityStreams = extractTopQualityStreams(targetEpisode);
-            if (qualityStreams.primary) {
-              backgroundUpload(qualityStreams.primary, {
-                title: `${title}${type === 'tv' ? ` S${season}E${episode}` : ''} (TMDB: ${tmdbId})`,
-                type: 'tv',
-                tmdbId,
-                season: parseInt(season, 10),
-                episode: parseInt(episode, 10),
-                quality: qualityStreams.primaryQuality
-              });
-            }
-          }
+
 
           if (fastMode && streamLinks.length > 0) {
             return res.json({
@@ -711,7 +696,7 @@ export const showboxController = {
                   const ext = episodeFile.file_name.split('.').pop().toLowerCase();
                   const episodeNumber = parseInt(episodeFile.file_name.match(/E(\d+)/i)?.[1] || '0', 10);
                   const qualityMatch = episodeFile.file_name.match(/(1080p|720p|480p|360p|2160p|4k)/i);
-                  const playerSources = await getStreamLinks(episodeFile.fid, userToken);
+                  const playerSources = await getStreamLinks(episodeFile.fid, userToken, shareKey);
 
                   return {
                     episode: episodeNumber,
@@ -746,18 +731,7 @@ export const showboxController = {
           seasons
         };
 
-        if (type === 'movie') {
-          const qualityStreams = extractTopQualityStreams(seasons[1]);
-          
-          if (!skipUpload && qualityStreams.primary) {
-            backgroundUpload(qualityStreams.primary, {
-              title: `${title} (TMDB: ${tmdbId})`,
-              type: 'movie',
-              tmdbId,
-              quality: qualityStreams.primaryQuality
-            });
-          }
-        }
+
 
         if (hasValidStreams(responseData)) {
           showboxCache.set(cacheKey, responseData);
@@ -771,7 +745,7 @@ export const showboxController = {
         streamLinks = await Promise.all(videoFiles.map(async (file) => {
           const ext = file.file_name.split('.').pop().toLowerCase();
           const qualityMatch = file.file_name.match(/(1080p|720p|480p|360p|2160p|4k)/i);
-          const playerSources = await getStreamLinks(file.fid, userToken);
+          const playerSources = await getStreamLinks(file.fid, userToken, shareKey);
           
           return {
             filename: file.file_name,
@@ -811,18 +785,7 @@ export const showboxController = {
           streams: targetEpisode
         };
 
-        // Upload high quality stream to Bunny
-        const qualityStreams = extractTopQualityStreams(targetEpisode);
-        if (!skipUpload && qualityStreams.primary) {
-          backgroundUpload(qualityStreams.primary, {
-            title: `${title}${type === 'tv' ? ` S${season}E${episode}` : ''} (TMDB: ${tmdbId})`,
-            type: 'tv',
-            tmdbId,
-            season: parseInt(season, 10),
-            episode: parseInt(episode, 10),
-            quality: qualityStreams.primaryQuality
-          });
-        }
+
 
         // Fast mode response
         if (fastMode && streamLinks.length > 0) {
@@ -855,19 +818,7 @@ export const showboxController = {
         streams: streamLinks
       };
 
-      // Upload movie to Bunny CDN
-      if (type === 'movie') {
-        const qualityStreams = extractTopQualityStreams(streamLinks);
-        
-        if (!skipUpload && qualityStreams.primary) {
-          backgroundUpload(qualityStreams.primary, {
-            title: `${title} (TMDB: ${tmdbId})`,
-            type: 'movie',
-            tmdbId,
-            quality: qualityStreams.primaryQuality
-          });
-        }
-      }
+
 
       if (hasValidStreams(responseData)) {
         showboxCache.set(cacheKey, responseData);
@@ -896,36 +847,14 @@ export const showboxController = {
 
   clearCache(req, res) {
     const cleared = showboxCache.flushAll();
+    const streamCleared = streamLinkCache.flushAll();
     return res.json({
       success: true,
       message: 'Cache cleared successfully',
-      itemsCleared: cleared
+      itemsCleared: cleared,
+      streamItemsCleared: streamCleared
     });
   },
   
-  async listBunnyVideos(req, res) {
-    try {
-      await bunnyStreamController.initialize();
-      const videos = bunnyStreamController.allVideos;
-      
-      return res.json({
-        success: true,
-        total: videos.length,
-        videos: videos.map(v => ({
-          id: v.guid,
-          title: v.title,
-          status: v.status,
-          created: v.dateUploaded,
-          length: v.length,
-          views: v.views,
-          url: v.directPlayUrl
-        }))
-      });
-    } catch (error) {
-      return res.status(500).json({
-        success: false,
-        error: error.message
-      });
-    }
-  }
+
 };

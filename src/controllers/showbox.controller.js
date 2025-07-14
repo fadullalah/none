@@ -73,10 +73,13 @@ function getScraperUrl(url) {
   return `http://api.scraperapi.com?api_key=${SCRAPER_API_KEY}&url=${encodeURIComponent(url)}`;
 }
 
-async function getStreamLinks(fid, customToken = null, shareKey = null) {
+async function getStreamLinks(fid, customToken = null, shareKey = null, retryCount = 0) {
   const cacheKey = `stream:${fid}`;
   const cached = streamLinkCache.get(cacheKey);
   if (cached) return cached;
+  
+  const maxRetries = 3;
+  const baseDelay = 1000; // 1 second base delay
   
   const token = customToken || UI_TOKENS[Math.floor(Math.random() * UI_TOKENS.length)];
 
@@ -100,20 +103,72 @@ async function getStreamLinks(fid, customToken = null, shareKey = null) {
     });
 
     if (!playerResponse.ok) {
-      return [];
+      throw new Error(`HTTP ${playerResponse.status}: ${playerResponse.statusText}`);
     }
 
     const playerHtml = await playerResponse.text();
-    const sourcesMatch = playerHtml.match(/var sources = (\[.*?\]);/s);
+    
+    // Validate that we got actual HTML content
+    if (!playerHtml || playerHtml.length < 100) {
+      throw new Error('Received empty or invalid HTML response');
+    }
+    
+    let sourcesMatch = playerHtml.match(/var sources = (\[.*?\]);/s);
     
     if (!sourcesMatch) {
-      return [];
+      // Check if we got an error page or different response format
+      if (playerHtml.includes('error') || playerHtml.includes('Error')) {
+        throw new Error('FebBox returned an error page');
+      }
+      
+      // Try alternative patterns
+      sourcesMatch = playerHtml.match(/sources\s*=\s*(\[.*?\]);/s) || 
+                      playerHtml.match(/var\s+playerSources\s*=\s*(\[.*?\]);/s);
+      
+      if (!sourcesMatch) {
+        throw new Error('No sources found in player response');
+      }
     }
 
-    const sources = JSON.parse(sourcesMatch[1]);
-    streamLinkCache.set(cacheKey, sources);
-    return sources;
+    let sources;
+    try {
+      sources = JSON.parse(sourcesMatch[1]);
+    } catch (parseError) {
+      throw new Error(`Failed to parse sources JSON: ${parseError.message}`);
+    }
+    
+    // Validate sources structure
+    if (!Array.isArray(sources) || sources.length === 0) {
+      throw new Error('Sources array is empty or invalid');
+    }
+    
+    // Validate that sources have required properties
+    const validSources = sources.filter(source => {
+      return source && typeof source === 'object' && 
+             (source.file || source.src || source.url) && 
+             (source.quality || source.label);
+    });
+    
+    if (validSources.length === 0) {
+      throw new Error('No valid sources found in response');
+    }
+    
+    streamLinkCache.set(cacheKey, validSources);
+    return validSources;
+    
   } catch (error) {
+    // Retry logic with exponential backoff
+    if (retryCount < maxRetries) {
+      const delay = baseDelay * Math.pow(2, retryCount) + Math.random() * 1000; // Add jitter
+      
+      await new Promise(resolve => setTimeout(resolve, delay));
+      
+      // Try with a different token on retry
+      const newToken = UI_TOKENS[Math.floor(Math.random() * UI_TOKENS.length)];
+      return getStreamLinks(fid, newToken, shareKey, retryCount + 1);
+    }
+    
+    // If all retries failed, return empty array
     return [];
   }
 }
@@ -142,7 +197,6 @@ async function searchIMDB(title) {
     imdbCache.set(cacheKey, results);
     return results;
   } catch (error) {
-    console.error('❌ IMDB search failed:', error);
     return [];
   }
 }
@@ -252,7 +306,7 @@ async function searchShowboxByTitle(title, type, year) {
         match.id = detailMatch[1];
       }
     } catch (error) {
-      console.error('Failed to fetch detail page:', error);
+      // Failed to fetch detail page
     }
   }
 
@@ -358,7 +412,7 @@ async function tryUrlBasedId(title, year, type) {
       }
     }
   } catch (error) {
-    console.error(`❌ Error in tryUrlBasedId:`, error);
+    // Error in tryUrlBasedId
   }
   
   return null;
@@ -504,6 +558,56 @@ function hasValidStreams(data) {
   return false;
 }
 
+// Helper function to retry fetching streams for items with empty player_streams
+async function retryEmptyStreams(items, userToken, shareKey, maxRetries = 2) {
+  const itemsToRetry = items.filter(item => 
+    !item.player_streams || item.player_streams.length === 0
+  );
+  
+  if (itemsToRetry.length === 0) return items;
+  
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    for (const item of itemsToRetry) {
+      if (!item.player_streams || item.player_streams.length === 0) {
+        try {
+          // Extract FID from direct_download URL if available
+          let fid = item.fid;
+          if (!fid && item.direct_download) {
+            const fidMatch = item.direct_download.match(/fid=([^&]+)/);
+            if (fidMatch) {
+              fid = fidMatch[1];
+            }
+          }
+          
+          if (fid) {
+            const retryStreams = await getStreamLinks(fid, userToken, shareKey);
+            if (retryStreams && retryStreams.length > 0) {
+              item.player_streams = retryStreams;
+            }
+          }
+        } catch (error) {
+          // Retry failed for item
+        }
+      }
+    }
+    
+    // Check if we still have items with empty streams
+    const stillEmpty = itemsToRetry.filter(item => 
+      !item.player_streams || item.player_streams.length === 0
+    );
+    
+    if (stillEmpty.length === 0) {
+      break;
+    }
+    
+    if (attempt < maxRetries) {
+      await new Promise(resolve => setTimeout(resolve, 2000)); // 2 second delay between attempts
+    }
+  }
+  
+  return items;
+}
+
 export const showboxController = {
   async getShowboxUrl(req, res) {
     const { type, tmdbId } = req.params;
@@ -521,8 +625,6 @@ export const showboxController = {
       return res.json({...cachedResult, source: 'cache'});
     }
 
-    console.log(`\n🎬 Starting ShowBox scrape for TMDB ID: ${tmdbId} [${type}]${userToken ? ' with user token' : ''}`);
-    
     try {
       const tmdbResponse = await fetch(
         `https://api.themoviedb.org/3/${type}/${tmdbId}?api_key=${process.env.API_TOKEN}`
@@ -535,7 +637,6 @@ export const showboxController = {
       showboxId = await tryUrlBasedId(title, year, type);
       
       if (!showboxId) {
-        console.log('⚠️ Falling back to search method...');
         const searchResult = await searchShowboxByTitle(title, type, year);
         if (!searchResult?.id) {
           throw new Error('Content not found on ShowBox');
@@ -591,14 +692,17 @@ export const showboxController = {
                 type: ext,
                 size: episodeFile.file_size,
                 player_streams: playerSources,
-                direct_download: `https://www.febbox.com/file/download_share?fid=${episodeFile.fid}&share_key=${shareKey}`
+                direct_download: `https://www.febbox.com/file/download_share?fid=${episodeFile.fid}&share_key=${shareKey}`,
+                fid: episodeFile.fid
               };
             }));
 
             const filteredEpisodes = seasonEpisodes.filter(e => e !== null);
             
             if (filteredEpisodes.length > 0) {
-              seasons[parseInt(season, 10)] = filteredEpisodes;
+              // Retry any episodes with empty streams
+              const retriedEpisodes = await retryEmptyStreams(filteredEpisodes, userToken, shareKey);
+              seasons[parseInt(season, 10)] = retriedEpisodes;
             }
           } else {
             // Fallback: If no season folder found, try to find episodes in root directory
@@ -628,13 +732,16 @@ export const showboxController = {
                   type: ext,
                   size: episodeFile.file_size,
                   player_streams: playerSources,
-                  direct_download: `https://www.febbox.com/file/download_share?fid=${episodeFile.fid}&share_key=${shareKey}`
+                  direct_download: `https://www.febbox.com/file/download_share?fid=${episodeFile.fid}&share_key=${shareKey}`,
+                  fid: episodeFile.fid
                 };
               }));
 
               const filteredEpisodes = seasonEpisodes.filter(e => e !== null);
               if (filteredEpisodes.length > 0) {
-                seasons[parseInt(season, 10)] = filteredEpisodes;
+                // Retry any episodes with empty streams
+                const retriedEpisodes = await retryEmptyStreams(filteredEpisodes, userToken, shareKey);
+                seasons[parseInt(season, 10)] = retriedEpisodes;
               }
             }
           }
@@ -678,7 +785,10 @@ export const showboxController = {
             });
           }
 
-          if (hasValidStreams(responseData)) {
+          // Final validation and logging
+          const hasStreams = hasValidStreams(responseData);
+          
+          if (hasStreams) {
             showboxCache.set(cacheKey, responseData);
           }
 
@@ -705,16 +815,19 @@ export const showboxController = {
                     type: ext,
                     size: episodeFile.file_size,
                     player_streams: playerSources,
-                    direct_download: `https://www.febbox.com/file/download_share?fid=${episodeFile.fid}&share_key=${shareKey}`
+                    direct_download: `https://www.febbox.com/file/download_share?fid=${episodeFile.fid}&share_key=${shareKey}`,
+                    fid: episodeFile.fid
                   };
                 }));
 
                 const filteredEpisodes = seasonEpisodes.filter(e => e !== null);
                 if (filteredEpisodes.length > 0) {
-                  seasons[seasonNum] = filteredEpisodes;
+                  // Retry any episodes with empty streams
+                  const retriedEpisodes = await retryEmptyStreams(filteredEpisodes, userToken, shareKey);
+                  seasons[seasonNum] = retriedEpisodes;
                 }
               } catch (error) {
-                console.error(`Error processing season ${seasonNum}:`, error.message);
+                // Error processing season
               }
             }
           }
@@ -753,9 +866,13 @@ export const showboxController = {
             type: ext,
             size: file.file_size,
             player_streams: playerSources,
-            direct_download: `https://www.febbox.com/file/download_share?fid=${file.fid}&share_key=${shareKey}`
+            direct_download: `https://www.febbox.com/file/download_share?fid=${file.fid}&share_key=${shareKey}`,
+            fid: file.fid
           };
         }));
+        
+        // Retry any movies with empty streams
+        streamLinks = await retryEmptyStreams(streamLinks, userToken, shareKey);
       }
 
       // Return results for TV episode
@@ -827,14 +944,6 @@ export const showboxController = {
       return res.json(responseData);
 
     } catch (error) {
-      console.error('❌ ShowBox scraping failed:', {
-        error: error.message,
-        tmdbId,
-        type,
-        showboxId,
-        title: tmdbData?.title || tmdbData?.name || 'Unknown'
-      });
-      
       return res.status(500).json({
         success: false,
         error: error.message,

@@ -25,6 +25,7 @@ app.use(cors({
     'https://nunflix.vercel.app',
     'https://nunflix.app',
     'https://nunflix-ey9.pages.dev',
+    'http://192.168.100.168:3002',
     'https://com.nunflix.app'
   ],
   methods: ['GET', 'POST', 'OPTIONS'],

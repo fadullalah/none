@@ -12,7 +12,7 @@ import { showboxController } from '../controllers/showbox.controller.js';
 import { playerScraperController } from '../controllers/player.scraper.controller.js';
 import { faselhdController } from '../controllers/faselhd.controller.js';
 import { alootvController } from '../controllers/alooytv.controller.js';
-import { bunnyStreamController } from '../controllers/bunny.controller.js';
+
 import { subtitleCache } from '../utils/cache-manager.js';
 import { movieboxController } from '../controllers/moviebox.controller.js';
 
@@ -34,7 +34,6 @@ router.get('/parental-rating/:type/:title', parentalRatingController.getParental
 router.get('/showbox/:type/:tmdbId', showboxController.getShowboxUrl);
 
 // New showbox-related routes
-router.get('/bunny/videos', showboxController.listBunnyVideos);
 router.get('/showbox/clear-cache', showboxController.clearCache);
 
 // New quality route
@@ -51,52 +50,7 @@ router.get('/faselhd/tv/:tmdbId', faselhdController.getTvEpisodeByTmdbId.bind(fa
 router.get('/alootv/movie/:tmdbId', alootvController.getMovieByTmdbId.bind(alootvController));
 router.get('/alootv/tv/:tmdbId', alootvController.getTvEpisodeByTmdbId.bind(alootvController));
 
-// New Bunny Stream routes
-router.get('/bunny/collections', async (req, res) => {
-  try {
-    await bunnyStreamController.initialize();
-    
-    return res.json({
-      success: true,
-      total: bunnyStreamController.allCollections.length,
-      collections: bunnyStreamController.allCollections.map(c => ({
-        id: c.guid,
-        name: c.name,
-        videoCount: c.videoCount
-      }))
-    });
-  } catch (error) {
-    return res.status(500).json({
-      success: false,
-      error: error.message
-    });
-  }
-});
 
-router.get('/bunny/collections/:id/videos', async (req, res) => {
-  try {
-    const { id } = req.params;
-    const videos = await bunnyStreamController.getCollectionVideos(id);
-    
-    return res.json({
-      success: true,
-      total: videos.length,
-      videos: videos.map(v => ({
-        id: v.guid,
-        title: v.title,
-        status: v.status,
-        created: v.dateUploaded,
-        length: v.length,
-        url: v.directPlayUrl
-      }))
-    });
-  } catch (error) {
-    return res.status(500).json({
-      success: false,
-      error: error.message
-    });
-  }
-});
 
 // New OpenSubtitles API routes
 router.get('/subtitles/search', subtitleController.searchSubtitles);

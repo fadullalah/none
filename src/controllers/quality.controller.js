@@ -334,6 +334,7 @@ function isLimitError(data) {
         item && item.error && (
             item.error.includes('limit exceeded') || 
             item.error.includes('KV get() limit') ||
+            item.error.includes('KV put() limit') ||
             item.error.includes('rate limit')
         )
     );

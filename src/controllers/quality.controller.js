@@ -368,6 +368,7 @@ export const qualityController = {
                     } catch (error) {
                         console.error(`Failed to convert TMDB ID ${tmdbId}:`, error);
                         results[tmdbId] = { error: 'TMDB conversion failed' };
+                        // Don't cache error responses
                     }
                 }
             }
@@ -406,18 +407,20 @@ export const qualityController = {
                             await redisCache.set(`imdb-${id}`, directResult, CACHE_TTL.IMDB_QUALITY);
                         } else {
                             results[id] = { error: directResult.error };
+                            // Don't cache error responses
                         }
                     }
                 } else if (workerResults) {
-                    // Process normal worker results
-                    for (const [id, data] of Object.entries(workerResults)) {
-                        if (!data.error) {
-                            results[id] = data;
-                            await redisCache.set(`imdb-${id}`, data, CACHE_TTL.IMDB_QUALITY);
-                        } else {
-                            results[id] = data;
-                        }
-                    }
+                                // Process normal worker results
+            for (const [id, data] of Object.entries(workerResults)) {
+                if (!data.error) {
+                    results[id] = data;
+                    await redisCache.set(`imdb-${id}`, data, CACHE_TTL.IMDB_QUALITY);
+                } else {
+                    results[id] = data;
+                    // Don't cache error responses
+                }
+            }
                 } else {
                     // Worker completely failed, use direct implementation
                     console.log('Worker failed, falling back to direct implementation');
@@ -429,6 +432,7 @@ export const qualityController = {
                             await redisCache.set(`imdb-${id}`, directResult, CACHE_TTL.IMDB_QUALITY);
                         } else {
                             results[id] = { error: directResult.error };
+                            // Don't cache error responses
                         }
                     }
                 }

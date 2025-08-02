@@ -3,17 +3,112 @@ import * as cheerio from 'cheerio';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
-import NodeCache from 'node-cache';
 
 // Get directory name
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-// Caches
-const showboxCache = new NodeCache({ stdTTL: 14400 }); // 4 hours
-const imdbCache = new NodeCache({ stdTTL: 172800 }); // 48 hours
-const urlCache = new NodeCache({ stdTTL: 14400 }); // 12 hours
-const streamLinkCache = new NodeCache({ stdTTL: 14400 }); // 1 hour
+// Redis configuration
+const REDIS_URL = process.env.UPSTASH_REDIS_REST_URL;
+const REDIS_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN;
+
+// Cache TTL values (reduced for cost-effectiveness)
+const CACHE_TTL = {
+  SHOWBOX: 3600, // 1 hour (was 4 hours)
+  IMDB: 86400, // 24 hours (was 48 hours)
+  URL: 3600, // 1 hour (was 12 hours)
+  STREAM_LINKS: 1800 // 30 minutes (was 1 hour)
+};
+
+// Redis cache helper functions
+class RedisCache {
+  constructor() {
+    this.baseUrl = REDIS_URL;
+    this.token = REDIS_TOKEN;
+  }
+
+  async get(key) {
+    try {
+      const response = await fetch(`${this.baseUrl}/get/${encodeURIComponent(key)}`, {
+        headers: {
+          'Authorization': `Bearer ${this.token}`
+        }
+      });
+      
+      if (!response.ok) {
+        console.log(`Redis GET failed for key: ${key}, status: ${response.status}`);
+        return null;
+      }
+      
+      const data = await response.json();
+      return data.result ? JSON.parse(data.result) : null;
+    } catch (error) {
+      console.log(`Redis GET error for key: ${key}:`, error.message);
+      return null;
+    }
+  }
+
+  async set(key, value, ttl = 3600) {
+    try {
+      // Upstash Redis REST API expects EX as a query parameter for SET
+      const url = `${this.baseUrl}/set/${encodeURIComponent(key)}/${encodeURIComponent(JSON.stringify(value))}?EX=${ttl}`;
+      
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${this.token}`
+        }
+        // Remove body - EX parameter is now in query string
+      });
+      
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.log(`Redis SET failed for key: ${key}, status: ${response.status}, response: ${errorText}`);
+        return false;
+      }
+      
+      return true;
+    } catch (error) {
+      console.log(`Redis SET error for key: ${key}:`, error.message);
+      return false;
+    }
+  }
+
+  async del(key) {
+    try {
+      const response = await fetch(`${this.baseUrl}/del/${encodeURIComponent(key)}`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${this.token}`
+        }
+      });
+      
+      return response.ok;
+    } catch (error) {
+      console.log(`Redis DEL error for key: ${key}:`, error.message);
+      return false;
+    }
+  }
+
+  async flushAll() {
+    try {
+      const response = await fetch(`${this.baseUrl}/flushall`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${this.token}`
+        }
+      });
+      
+      return response.ok;
+    } catch (error) {
+      console.log('Redis FLUSHALL error:', error.message);
+      return false;
+    }
+  }
+}
+
+// Initialize Redis cache
+const redisCache = new RedisCache();
 
 // Constants
 const SCRAPER_API_KEY = '169e05c208dcbe5e453edd9c5957cc40';
@@ -75,7 +170,7 @@ function getScraperUrl(url) {
 
 async function getStreamLinks(fid, customToken = null, shareKey = null, retryCount = 0) {
   const cacheKey = `stream:${fid}`;
-  const cached = streamLinkCache.get(cacheKey);
+  const cached = await redisCache.get(cacheKey);
   if (cached) return cached;
   
   const maxRetries = 3;
@@ -153,7 +248,7 @@ async function getStreamLinks(fid, customToken = null, shareKey = null, retryCou
       throw new Error('No valid sources found in response');
     }
     
-    streamLinkCache.set(cacheKey, validSources);
+    await redisCache.set(cacheKey, validSources, CACHE_TTL.STREAM_LINKS);
     return validSources;
     
   } catch (error) {
@@ -175,7 +270,7 @@ async function getStreamLinks(fid, customToken = null, shareKey = null, retryCou
 
 async function searchIMDB(title) {
   const cacheKey = `imdb:${title.toLowerCase()}`;
-  const cached = imdbCache.get(cacheKey);
+  const cached = await redisCache.get(cacheKey);
   if (cached) return cached;
 
   try {
@@ -194,7 +289,7 @@ async function searchIMDB(title) {
       if (isTV) results.push({ title, year });
     });
     
-    imdbCache.set(cacheKey, results);
+    await redisCache.set(cacheKey, results, CACHE_TTL.IMDB);
     return results;
   } catch (error) {
     return [];
@@ -334,7 +429,7 @@ async function tryUrlBasedId(title, year, type) {
   const prefix = type === 'movie' ? 'm-' : 't-';
   
   const cacheKey = `url:${type}:${formattedTitle}:${year}`;
-  const cachedId = urlCache.get(cacheKey);
+  const cachedId = await redisCache.get(cacheKey);
   if (cachedId) return cachedId;
 
   const url = `https://showbox.media/${type}/${prefix}${formattedTitle}-${year}`;
@@ -353,7 +448,7 @@ async function tryUrlBasedId(title, year, type) {
       if (detailUrl) {
         const idMatch = detailUrl.match(/\/detail\/(\d+)/);
         if (idMatch) {
-          urlCache.set(cacheKey, idMatch[1]);
+          await redisCache.set(cacheKey, idMatch[1], CACHE_TTL.URL);
           return idMatch[1];
         }
       }
@@ -407,7 +502,7 @@ async function tryUrlBasedId(title, year, type) {
         .map(r => r.value)[0];
       
       if (successfulResult) {
-        urlCache.set(cacheKey, successfulResult.id);
+        await redisCache.set(cacheKey, successfulResult.id, CACHE_TTL.URL);
         return successfulResult.id;
       }
     }
@@ -616,18 +711,21 @@ export const showboxController = {
     let tmdbData = null;
     const userToken = token || null;
     
+    // Clean tmdbId - remove any query parameters that might have been included
+    const cleanTmdbId = tmdbId.split('&')[0].split('?')[0];
+    
     const tokenIdentifier = userToken || 'default';
-    const cacheKey = `showbox:${tmdbId}:${type}${season ? `:s${season}` : ''}${episode ? `:e${episode}` : ''}:js:${tokenIdentifier}`;
+    const cacheKey = `showbox:${cleanTmdbId}:${type}${season ? `:s${season}` : ''}${episode ? `:e${episode}` : ''}:js:${tokenIdentifier}`;
     
     // Check cache first
-    const cachedResult = showboxCache.get(cacheKey);
+    const cachedResult = await redisCache.get(cacheKey);
     if (cachedResult) {
       return res.json({...cachedResult, source: 'cache'});
     }
 
     try {
       const tmdbResponse = await fetch(
-        `https://api.themoviedb.org/3/${type}/${tmdbId}?api_key=${process.env.API_TOKEN}`
+        `https://api.themoviedb.org/3/${type}/${cleanTmdbId}?api_key=${process.env.API_TOKEN}`
       );
       tmdbData = await tmdbResponse.json();
       
@@ -789,7 +887,7 @@ export const showboxController = {
           const hasStreams = hasValidStreams(responseData);
           
           if (hasStreams) {
-            showboxCache.set(cacheKey, responseData);
+            await redisCache.set(cacheKey, responseData, CACHE_TTL.SHOWBOX);
           }
 
           return res.json(responseData);
@@ -847,7 +945,7 @@ export const showboxController = {
 
 
         if (hasValidStreams(responseData)) {
-          showboxCache.set(cacheKey, responseData);
+          await redisCache.set(cacheKey, responseData, CACHE_TTL.SHOWBOX);
         }
 
         return res.json(responseData);
@@ -917,7 +1015,7 @@ export const showboxController = {
         }
 
         if (hasValidStreams(responseData)) {
-          showboxCache.set(cacheKey, responseData);
+          await redisCache.set(cacheKey, responseData, CACHE_TTL.SHOWBOX);
         }
 
         return res.json(responseData);
@@ -938,7 +1036,7 @@ export const showboxController = {
 
 
       if (hasValidStreams(responseData)) {
-        showboxCache.set(cacheKey, responseData);
+        await redisCache.set(cacheKey, responseData, CACHE_TTL.SHOWBOX);
       }
 
       return res.json(responseData);
@@ -954,15 +1052,21 @@ export const showboxController = {
     }
   },
 
-  clearCache(req, res) {
-    const cleared = showboxCache.flushAll();
-    const streamCleared = streamLinkCache.flushAll();
-    return res.json({
-      success: true,
-      message: 'Cache cleared successfully',
-      itemsCleared: cleared,
-      streamItemsCleared: streamCleared
-    });
+  async clearCache(req, res) {
+    try {
+      const cleared = await redisCache.flushAll();
+      return res.json({
+        success: true,
+        message: 'Cache cleared successfully',
+        cleared: cleared
+      });
+    } catch (error) {
+      return res.status(500).json({
+        success: false,
+        error: 'Failed to clear cache',
+        message: error.message
+      });
+    }
   },
   
 

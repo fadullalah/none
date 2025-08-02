@@ -1,10 +1,107 @@
-import NodeCache from 'node-cache';
 import _ from 'lodash';
 import fetch from 'node-fetch';
 import { withProxy } from '../utils/proxy-integration.js';
 
-// Initialize cache with 24 hour TTL
-const cache = new NodeCache({ stdTTL: 24 * 60 * 60 });
+// Redis configuration for quality controller
+const REDIS_URL = process.env.UPSTASH_QUALITY_REDIS_REST_URL;
+const REDIS_TOKEN = process.env.UPSTASH_QUALITY_REDIS_REST_TOKEN;
+
+// Cache TTL values (reduced for cost-effectiveness)
+const CACHE_TTL = {
+  TMDB_CONVERT: 86400, // 24 hours
+  IMDB_QUALITY: 3600, // 1 hour
+  WORKER_RESULTS: 1800 // 30 minutes
+};
+
+// Redis cache helper functions
+class RedisCache {
+  constructor() {
+    this.baseUrl = REDIS_URL;
+    this.token = REDIS_TOKEN;
+  }
+
+  async get(key) {
+    try {
+      const response = await fetch(`${this.baseUrl}/get/${encodeURIComponent(key)}`, {
+        headers: {
+          'Authorization': `Bearer ${this.token}`
+        }
+      });
+      
+      if (!response.ok) {
+        console.log(`Redis GET failed for key: ${key}, status: ${response.status}`);
+        return null;
+      }
+      
+      const data = await response.json();
+      return data.result ? JSON.parse(data.result) : null;
+    } catch (error) {
+      console.log(`Redis GET error for key: ${key}:`, error.message);
+      return null;
+    }
+  }
+
+  async set(key, value, ttl = 3600) {
+    try {
+      // Upstash Redis REST API expects EX as a query parameter for SET
+      const url = `${this.baseUrl}/set/${encodeURIComponent(key)}/${encodeURIComponent(JSON.stringify(value))}?EX=${ttl}`;
+      
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${this.token}`
+        }
+        // Remove body - EX parameter is now in query string
+      });
+      
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.log(`Redis SET failed for key: ${key}, status: ${response.status}, response: ${errorText}`);
+        return false;
+      }
+      
+      return true;
+    } catch (error) {
+      console.log(`Redis SET error for key: ${key}:`, error.message);
+      return false;
+    }
+  }
+
+  async del(key) {
+    try {
+      const response = await fetch(`${this.baseUrl}/del/${encodeURIComponent(key)}`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${this.token}`
+        }
+      });
+      
+      return response.ok;
+    } catch (error) {
+      console.log(`Redis DEL error for key: ${key}:`, error.message);
+      return false;
+    }
+  }
+
+  async flushAll() {
+    try {
+      const response = await fetch(`${this.baseUrl}/flushall`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${this.token}`
+        }
+      });
+      
+      return response.ok;
+    } catch (error) {
+      console.log('Redis FLUSHALL error:', error.message);
+      return false;
+    }
+  }
+}
+
+// Initialize Redis cache
+const redisCache = new RedisCache();
 
 const TMDB_API_KEY = 'd3383b7991d02ed3b3842be70307705b';
 
@@ -42,7 +139,7 @@ let currentWorkerIndex = 0;
 // Convert TMDB ID to IMDB ID
 async function convertTmdbToImdb(tmdbId) {
     const cacheKey = `tmdb-convert-${tmdbId}`;
-    const cached = cache.get(cacheKey);
+    const cached = await redisCache.get(cacheKey);
     if (cached) return cached;
 
     try {
@@ -65,7 +162,7 @@ async function convertTmdbToImdb(tmdbId) {
         }
 
         // Cache the conversion
-        cache.set(cacheKey, imdbId);
+        await redisCache.set(cacheKey, imdbId, CACHE_TTL.TMDB_CONVERT);
         return imdbId;
     } catch (error) {
         console.error(`TMDB conversion error for ID ${tmdbId}:`, error);
@@ -280,14 +377,14 @@ export const qualityController = {
             
             // Check cache for all IMDB IDs
             const uncachedIds = [];
-            allImdbIds.forEach(id => {
-                const cached = cache.get(`imdb-${id}`);
+            for (const id of allImdbIds) {
+                const cached = await redisCache.get(`imdb-${id}`);
                 if (cached) {
                     results[id] = cached;
                 } else {
                     uncachedIds.push(id);
                 }
-            });
+            }
             
             // Fetch uncached IDs
             if (uncachedIds.length > 0) {
@@ -306,21 +403,21 @@ export const qualityController = {
                         const directResult = await fetchQualityInfoDirect(id);
                         if (!directResult.error) {
                             results[id] = directResult;
-                            cache.set(`imdb-${id}`, directResult);
+                            await redisCache.set(`imdb-${id}`, directResult, CACHE_TTL.IMDB_QUALITY);
                         } else {
                             results[id] = { error: directResult.error };
                         }
                     }
                 } else if (workerResults) {
                     // Process normal worker results
-                    Object.entries(workerResults).forEach(([id, data]) => {
+                    for (const [id, data] of Object.entries(workerResults)) {
                         if (!data.error) {
                             results[id] = data;
-                            cache.set(`imdb-${id}`, data);
+                            await redisCache.set(`imdb-${id}`, data, CACHE_TTL.IMDB_QUALITY);
                         } else {
                             results[id] = data;
                         }
-                    });
+                    }
                 } else {
                     // Worker completely failed, use direct implementation
                     console.log('Worker failed, falling back to direct implementation');
@@ -329,7 +426,7 @@ export const qualityController = {
                         const directResult = await fetchQualityInfoDirect(id);
                         if (!directResult.error) {
                             results[id] = directResult;
-                            cache.set(`imdb-${id}`, directResult);
+                            await redisCache.set(`imdb-${id}`, directResult, CACHE_TTL.IMDB_QUALITY);
                         } else {
                             results[id] = { error: directResult.error };
                         }
@@ -355,8 +452,7 @@ export const qualityController = {
                 }
             }
 
-            const stats = cache.getStats();
-            console.log('Cache stats:', stats);
+            console.log('Quality cache operations completed');
 
             res.json(results);
         } catch (error) {

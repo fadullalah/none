@@ -27,7 +27,7 @@ app.use(cors({
     'https://nunflix.app',
     'https://nunflix-ey9.pages.dev',
     'https://com.nunflix.app',
-    'https://n-player.pages.dev/'
+    'https://n-player.pages.dev'
   ],
   methods: ['GET', 'POST', 'OPTIONS'],
   allowedHeaders: '*'

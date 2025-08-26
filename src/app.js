@@ -27,6 +27,7 @@ app.use(cors({
     'https://nunflix.app',
     'https://nunflix-ey9.pages.dev',
     'https://com.nunflix.app',
+    'http://192.168.100.248:5173',
     'https://n-player.pages.dev'
   ],
   methods: ['GET', 'POST', 'OPTIONS'],

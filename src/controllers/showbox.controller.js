@@ -10,10 +10,10 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 // Caches
-const showboxCache = new NodeCache({ stdTTL: 14400 }); // 4 hours
+const showboxCache = new NodeCache({ stdTTL: 3600 }); // 1 hour
 const imdbCache = new NodeCache({ stdTTL: 172800 }); // 48 hours
-const urlCache = new NodeCache({ stdTTL: 14400 }); // 12 hours
-const streamLinkCache = new NodeCache({ stdTTL: 14400 }); // 1 hour
+const urlCache = new NodeCache({ stdTTL: 3600 }); // 1 hour
+const streamLinkCache = new NodeCache({ stdTTL: 3600 }); // 1 hour
 
 // Constants
 const SCRAPER_API_KEY = '169e05c208dcbe5e453edd9c5957cc40';

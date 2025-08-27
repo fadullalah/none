@@ -3,8 +3,8 @@ import _ from 'lodash';
 import fetch from 'node-fetch';
 import { withProxy } from '../utils/proxy-integration.js';
 
-// Initialize cache with 24 hour TTL
-const cache = new NodeCache({ stdTTL: 24 * 60 * 60 });
+// Initialize cache with 48 hour TTL
+const cache = new NodeCache({ stdTTL: 48 * 60 * 60 });
 
 const TMDB_API_KEY = 'd3383b7991d02ed3b3842be70307705b';
 

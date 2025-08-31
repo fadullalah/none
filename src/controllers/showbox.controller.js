@@ -622,7 +622,9 @@ export const showboxController = {
     // Check cache first
     const cachedResult = showboxCache.get(cacheKey);
     if (cachedResult) {
-      return res.json({...cachedResult, source: 'cache'});
+              // Add cache headers - 1 hour TTL for showbox data
+        res.set('Cache-Control', 'public, max-age=3600');
+        return res.json({...cachedResult, source: 'cache'});
     }
 
     try {
@@ -906,20 +908,24 @@ export const showboxController = {
 
         // Fast mode response
         if (fastMode && streamLinks.length > 0) {
-          return res.json({
-            success: true,
-            tmdb_id: tmdbId,
-            type,
-            title,
-            fastMode: true,
-            streams: streamLinks.slice(0, 1)
-          });
+                  // Add cache headers - 1 hour TTL for showbox data
+        res.set('Cache-Control', 'public, max-age=3600');
+        return res.json({
+          success: true,
+          tmdb_id: tmdbId,
+          type,
+          title,
+          fastMode: true,
+          streams: streamLinks.slice(0, 1)
+        });
         }
 
         if (hasValidStreams(responseData)) {
           showboxCache.set(cacheKey, responseData);
         }
 
+        // Add cache headers - 1 hour TTL for showbox data
+        res.set('Cache-Control', 'public, max-age=3600');
         return res.json(responseData);
       }
 
@@ -941,6 +947,8 @@ export const showboxController = {
         showboxCache.set(cacheKey, responseData);
       }
 
+      // Add cache headers - 1 hour TTL for showbox data
+      res.set('Cache-Control', 'public, max-age=3600');
       return res.json(responseData);
 
     } catch (error) {

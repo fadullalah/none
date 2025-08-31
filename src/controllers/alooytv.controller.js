@@ -193,6 +193,8 @@ class AlooTVController {
         year: movieDetails.release_date ? new Date(movieDetails.release_date).getFullYear() : null
       });
       
+      // Add cache headers - 3 hours TTL
+      res.set('Cache-Control', 'public, max-age=10800');
       return res.json({
         success: true,
         title: movie.title,
@@ -353,6 +355,8 @@ class AlooTVController {
         });
       }
       
+      // Add cache headers - 3 hours TTL
+      res.set('Cache-Control', 'public, max-age=10800');
       return res.json({
         success: true,
         title: `${showDetails.title} - S${season}E${episode}`,

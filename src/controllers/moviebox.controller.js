@@ -1205,6 +1205,8 @@ class MovieBoxController {
       // Force close browser after successful request
       await this.forceCloseBrowser();
       
+      // Add cache headers - 3 hours TTL
+      res.set('Cache-Control', 'public, max-age=10800');
       return res.json({
         ...responseData,
         timing: {
@@ -1689,6 +1691,8 @@ class MovieBoxController {
       // Force close browser after successful request
       await this.forceCloseBrowser();
       
+      // Add cache headers - 3 hours TTL
+      res.set('Cache-Control', 'public, max-age=10800');
       return res.json(responseData);
     } catch (error) {
       console.error(`Error getting movie subtitles from MovieBox: ${error.message}`);

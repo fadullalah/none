@@ -358,6 +358,8 @@ export const qualityController = {
             const stats = cache.getStats();
             console.log('Cache stats:', stats);
 
+            // Add cache headers
+            res.set('Cache-Control', 'public, max-age=172800'); // 48 hours in seconds
             res.json(results);
         } catch (error) {
             console.error('Error in quality controller:', error);

@@ -580,11 +580,13 @@ class FaselHDController {
       const cachedResult = faselhdCache.get(cacheKey);
       
       if (cachedResult) {
-        return res.json({
-          success: true,
-          source: 'cache',
-          data: cachedResult
-        });
+              // Add cache headers - 3 hours TTL
+      res.set('Cache-Control', 'public, max-age=10800');
+      return res.json({
+        success: true,
+        source: 'cache',
+        data: cachedResult
+      });
       }
       
       // Get TV show details from TMDB API directly
@@ -646,6 +648,8 @@ class FaselHDController {
       // Save to cache
       faselhdCache.set(cacheKey, result);
       
+      // Add cache headers - 3 hours TTL
+      res.set('Cache-Control', 'public, max-age=10800');
       return res.json({
         success: true,
         source: 'extraction',

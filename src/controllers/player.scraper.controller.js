@@ -181,11 +181,13 @@ class PlayerScraperController {
       // Check cache first
       const cachedUrl = urlCache.get(url);
       if (cachedUrl) {
-        return res.json({
-          success: true,
-          source: 'cache',
-          videoUrl: cachedUrl
-        });
+              // Add cache headers - 3 hours TTL for URL cache
+      res.set('Cache-Control', 'public, max-age=10800');
+      return res.json({
+        success: true,
+        source: 'cache',
+        videoUrl: cachedUrl
+      });
       }
       
       // Start proxy update in background but don't wait for it
@@ -277,6 +279,8 @@ class PlayerScraperController {
       // Cache the result
       urlCache.set(url, videoUrl);
       
+      // Add cache headers - 3 hours TTL for URL cache
+      res.set('Cache-Control', 'public, max-age=10800');
       return res.json({
         success: true,
         source: 'extraction',

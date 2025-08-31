@@ -7,7 +7,7 @@ const TMDB_API_KEY = 'b29bfe548cc2a3e4225effbd54ef0fda';
 const TMDB_BASE_URL = 'https://api.themoviedb.org/3';
 const POSTER_BASE_URL = 'https://image.tmdb.org/t/p/w200';
 const BACKDROP_BASE_URL = 'https://image.tmdb.org/t/p/original';
-const CACHE_TTL = 60 * 60;
+const CACHE_TTL = 3 * 24 * 60 * 60; // 3 days in seconds
 
 async function getCachedData(key, fetchFunction) {
   const cachedData = cache.get(key);
@@ -71,6 +71,8 @@ export const tmdbController = {
   async getTrendingPosters(req, res) {
     try {
       const posters = await getCachedData('trending-posters', getTrendingPosters);
+      // Add cache headers - 3 days TTL
+      res.set('Cache-Control', 'public, max-age=259200');
       res.json(posters);
     } catch (error) {
       res.status(500).json({ error: 'Failed to fetch trending posters' });

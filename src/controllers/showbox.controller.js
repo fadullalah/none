@@ -16,7 +16,7 @@ const urlCache = new NodeCache({ stdTTL: 3600 }); // 1 hour
 const streamLinkCache = new NodeCache({ stdTTL: 3600 }); // 1 hour
 
 // Constants
-const SCRAPER_API_KEY = '169e05c208dcbe5e453edd9c5957cc40';
+const SCRAPINGBEE_API_KEY = 'DRX9T38TJ3OG27UDICA3A9BXYT3V0WGG6AG5ZB9DAAC4R3XMKPW74DM7YR05IV4CUNWBAF3RJ06C38GA';
 const UI_TOKENS = [
   'eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpYXQiOjE3NDI1NjM4MjYsIm5iZiI6MTc0MjU2MzgyNiwiZXhwIjoxNzczNjY3ODQ2LCJkYXRhIjp7InVpZCI6NjIzMzk2LCJ0b2tlbiI6IjUxZTVlMGQ5OTk5ZmYyNGNhNDU3Mjc0Y2Q2YTVhMmRmIn19.h5TNhw5vVjBdcyXruSSO3y_HfopZNr1NoEiAQBN0Rfk',
   'eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpYXQiOjE3Mzg3NzAxNjUsIm5iZiI6MTczODc3MDE2NSwiZXhwIjoxNzY5ODc0MTg1LCJkYXRhIjp7InVpZCI6Mzc2ODAyLCJ0b2tlbiI6IjkzNzM1MzViOTk3Yjk4ZmM5ZGY0YjVkYzA2ZWRjN2RiIn19.A3PZeqXtQm4YnxR4yOSHDnTDx4hayAC1VvD-s6aBEzo',
@@ -70,7 +70,7 @@ const getBestQualitySource = (sources) => {
 };
 
 function getScraperUrl(url) {
-  return `http://api.scraperapi.com?api_key=${SCRAPER_API_KEY}&url=${encodeURIComponent(url)}`;
+  return `https://app.scrapingbee.com/api/v1/?api_key=${SCRAPINGBEE_API_KEY}&url=${encodeURIComponent(url)}`;
 }
 
 async function getStreamLinks(fid, customToken = null, shareKey = null, retryCount = 0) {

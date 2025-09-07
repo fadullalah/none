@@ -28,7 +28,9 @@ app.use(cors({
     'https://nunflix-ey9.pages.dev',
     'https://com.nunflix.app',
     'http://192.168.100.248:5173',
-    'https://n-player.pages.dev'
+    'https://n-player.pages.dev',
+    'https://bingoanime.net',
+    'http://bingoanime.pages.dev'
   ],
   methods: ['GET', 'POST', 'OPTIONS'],
   allowedHeaders: '*'

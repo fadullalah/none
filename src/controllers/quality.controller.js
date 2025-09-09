@@ -22,6 +22,30 @@ function initDatabase() {
 // Torrentio API base URL
 const TORRENTIO_BASE_URL = 'https://torrentio.strem.fun/stream/movie';
 
+// TMDB API keys for fallback search
+const TMDB_API_KEYS = [
+    'fb7bb23f03b6994dafc674c074d01761',
+    'e55425032d3d0f371fc776f302e7c09b',
+    '8301a21598f8b45668d5711a814f01f6',
+    '8cf43ad9c085135b9479ad5cf6bbcbda',
+    'da63548086e399ffc910fbc08526df05',
+    '13e53ff644a8bd4ba37b3e1044ad24f3',
+    '269890f657dddf4635473cf4cf456576',
+    'a2f888b27315e62e471b2d587048f32e',
+    '8476a7ab80ad76f0936744df0430e67c',
+    '5622cafbfe8f8cfe358a29c53e19bba0',
+    'ae4bd1b6fce2a5648671bfc171d15ba4',
+    '257654f35e3dff105574f97fb4b97035',
+    '2f4038e83265214a0dcd6ec2eb3276f5',
+    '9e43f45f94705cc8e1d5a0400d19a7b7',
+    'af6887753365e14160254ac7f4345dd2',
+    '06f10fc8741a672af455421c239a1ffc',
+    '09ad8ace66eec34302943272db0e8d2c'
+];
+
+// TMDB API base URL with CORS proxy
+const TMDB_BASE_URL = 'https://api.allorigins.win/raw?url=https://api.themoviedb.org/3';
+
 // Search for movie by title in SQLite database
 async function findMovieByTitle(title) {
     initDatabase();
@@ -155,53 +179,342 @@ function determineBestQuality(qualities) {
     return qualities[0] || null;
 }
 
+// Get random TMDB API key
+function getRandomTmdbApiKey() {
+    return TMDB_API_KEYS[Math.floor(Math.random() * TMDB_API_KEYS.length)];
+}
+
+// Search for movie using TMDB API
+async function searchMovieByTitleTmdb(title) {
+    const apiKey = getRandomTmdbApiKey();
+    const searchUrl = `${TMDB_BASE_URL}/search/movie?api_key=${apiKey}&query=${encodeURIComponent(title)}&page=1`;
+    
+    try {
+        console.log(`Searching TMDB for: ${title}`);
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 15000); // 15 second timeout
+
+        const response = await fetch(searchUrl, {
+            signal: controller.signal,
+            headers: {
+                'Accept': 'application/json',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            }
+        });
+        clearTimeout(timeoutId);
+
+        if (!response.ok) {
+            throw new Error(`TMDB API error: ${response.status} ${response.statusText}`);
+        }
+
+        const data = await response.json();
+        
+        if (!data.results || data.results.length === 0) {
+            return null;
+        }
+
+        // Return the first result (most relevant)
+        const movie = data.results[0];
+        return {
+            tmdb_id: movie.id,
+            title: movie.title,
+            release_date: movie.release_date,
+            overview: movie.overview,
+            poster_path: movie.poster_path,
+            backdrop_path: movie.backdrop_path
+        };
+        
+    } catch (error) {
+        if (error.name === 'AbortError') {
+            console.error(`TMDB search request timed out for: ${title}`);
+            return null;
+        }
+        console.error(`Error searching TMDB for ${title}:`, error);
+        return null;
+    }
+}
+
+// Get movie details from TMDB API to extract IMDb ID
+async function getMovieDetailsFromTmdb(tmdbId) {
+    const apiKey = getRandomTmdbApiKey();
+    const detailsUrl = `${TMDB_BASE_URL}/movie/${tmdbId}?api_key=${apiKey}`;
+    
+    try {
+        console.log(`Fetching TMDB details for ID: ${tmdbId}`);
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 15000); // 15 second timeout
+
+        const response = await fetch(detailsUrl, {
+            signal: controller.signal,
+            headers: {
+                'Accept': 'application/json',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            }
+        });
+        clearTimeout(timeoutId);
+
+        if (!response.ok) {
+            throw new Error(`TMDB API error: ${response.status} ${response.statusText}`);
+        }
+
+        const data = await response.json();
+        
+        if (!data.imdb_id) {
+            console.log(`No IMDb ID found for TMDB ID: ${tmdbId}`);
+            return null;
+        }
+
+        return {
+            imdb_id: data.imdb_id,
+            title: data.title,
+            release_date: data.release_date,
+            overview: data.overview,
+            poster_path: data.poster_path,
+            backdrop_path: data.backdrop_path
+        };
+        
+    } catch (error) {
+        if (error.name === 'AbortError') {
+            console.error(`TMDB details request timed out for ID: ${tmdbId}`);
+            return null;
+        }
+        console.error(`Error fetching TMDB details for ID ${tmdbId}:`, error);
+        return null;
+    }
+}
+
 
 export const qualityController = {
     async getQualityInfo(req, res) {
-        const { title } = req.query;
+        const { title, tmdb_ids } = req.query;
         
+        // Handle direct TMDB ID lookup (single or multiple)
+        if (tmdb_ids) {
+            try {
+                // Parse TMDB IDs - support both single ID and comma-separated multiple IDs
+                const tmdbIdStrings = tmdb_ids.split(',').map(id => id.trim());
+                const tmdbIds = tmdbIdStrings.map(id => parseInt(id)).filter(id => !isNaN(id));
+                
+                if (tmdbIds.length === 0) {
+                    return res.status(400).json({ error: 'Invalid TMDB ID format. Provide valid comma-separated IDs.' });
+                }
+
+                console.log(`Direct TMDB lookup for IDs: ${tmdbIds.join(', ')}`);
+
+                // Process multiple TMDB IDs
+                const results = {};
+                const movieInfos = [];
+                const errors = [];
+
+                // Process each TMDB ID
+                for (const tmdbId of tmdbIds) {
+                    try {
+                        // Get movie details from TMDB to extract IMDb ID
+                        const movieDetails = await getMovieDetailsFromTmdb(tmdbId);
+                        
+                        if (!movieDetails) {
+                            errors.push({
+                                tmdbId: tmdbId,
+                                error: 'Movie not found in TMDB or no IMDb ID available'
+                            });
+                            continue;
+                        }
+
+                        console.log(`Found movie via TMDB: ${movieDetails.title} (${movieDetails.imdb_id})`);
+
+                        // Check cache first
+                        const cacheKey = `imdb-${movieDetails.imdb_id}`;
+                        const cached = cache.get(cacheKey);
+                        
+                        if (cached) {
+                            console.log(`Returning cached result for TMDB ID: ${tmdbId}`);
+                            results[movieDetails.imdb_id] = cached;
+                            movieInfos.push({
+                                tconst: movieDetails.imdb_id,
+                                title: movieDetails.title,
+                                tmdb_id: tmdbId,
+                                source: 'tmdb'
+                            });
+                            continue;
+                        }
+
+                        // Fetch quality info from Torrentio API
+                        const qualityInfo = await fetchQualityInfoFromTorrentio(movieDetails.imdb_id);
+                        
+                        if (qualityInfo.error) {
+                            errors.push({
+                                tmdbId: tmdbId,
+                                imdbId: movieDetails.imdb_id,
+                                title: movieDetails.title,
+                                error: qualityInfo.error
+                            });
+                            continue;
+                        }
+
+                        // Cache the result
+                        cache.set(cacheKey, qualityInfo);
+                        
+                        // Add to results
+                        results[movieDetails.imdb_id] = qualityInfo;
+                        movieInfos.push({
+                            tconst: movieDetails.imdb_id,
+                            title: movieDetails.title,
+                            tmdb_id: tmdbId,
+                            source: 'tmdb'
+                        });
+
+                    } catch (error) {
+                        console.error(`Error processing TMDB ID ${tmdbId}:`, error);
+                        errors.push({
+                            tmdbId: tmdbId,
+                            error: error.message
+                        });
+                    }
+                }
+
+                // Prepare response
+                const response = {
+                    results: results,
+                    movieInfos: movieInfos,
+                    summary: {
+                        totalRequested: tmdbIds.length,
+                        successful: movieInfos.length,
+                        failed: errors.length
+                    }
+                };
+
+                // Add errors if any
+                if (errors.length > 0) {
+                    response.errors = errors;
+                }
+
+                // Set appropriate status code
+                const statusCode = movieInfos.length > 0 ? 200 : 404;
+                
+                // Add cache headers
+                res.set('Cache-Control', 'public, max-age=172800'); // 48 hours in seconds
+                res.status(statusCode).json(response);
+                
+            } catch (error) {
+                console.error('Error in TMDB quality controller:', error);
+                res.status(500).json({ error: error.message });
+            }
+            return;
+        }
+
+        // Handle title-based search with fallback
         if (!title) {
             return res.status(400).json({ error: 'Title parameter is required' });
         }
 
         try {
-            // Search for movie in SQLite database
+            // First, search for movie in SQLite database
             const movie = await findMovieByTitle(title);
             
-            if (!movie) {
+            if (movie) {
+                console.log(`Found movie in database: ${movie.title} (${movie.tconst})`);
+
+                // Check cache first
+                const cacheKey = `imdb-${movie.tconst}`;
+                const cached = cache.get(cacheKey);
+                
+                if (cached) {
+                    console.log('Returning cached result');
+                    res.set('Cache-Control', 'public, max-age=172800'); // 48 hours
+                    return res.json({
+                        [movie.tconst]: cached,
+                        movieInfo: {
+                            tconst: movie.tconst,
+                            title: movie.title,
+                            source: 'database'
+                        }
+                    });
+                }
+
+                // Fetch quality info from Torrentio API
+                const qualityInfo = await fetchQualityInfoFromTorrentio(movie.tconst);
+                
+                if (qualityInfo.error) {
+                    return res.status(500).json({ 
+                        error: qualityInfo.error,
+                        movieInfo: {
+                            tconst: movie.tconst,
+                            title: movie.title,
+                            source: 'database'
+                        }
+                    });
+                }
+
+                // Cache the result
+                cache.set(cacheKey, qualityInfo);
+
+                // Add cache headers
+                res.set('Cache-Control', 'public, max-age=172800'); // 48 hours in seconds
+                res.json({
+                    [movie.tconst]: qualityInfo,
+                    movieInfo: {
+                        tconst: movie.tconst,
+                        title: movie.title,
+                        source: 'database'
+                    }
+                });
+                return;
+            }
+
+            // Fallback: Search using TMDB API
+            console.log(`Movie not found in database, trying TMDB fallback for: ${title}`);
+            
+            const tmdbMovie = await searchMovieByTitleTmdb(title);
+            
+            if (!tmdbMovie) {
                 return res.status(404).json({ 
-                    error: 'Movie not found in database',
+                    error: 'Movie not found in database or TMDB',
                     searchedTitle: title
                 });
             }
 
-            console.log(`Found movie: ${movie.title} (${movie.tconst})`);
+            // Get movie details to extract IMDb ID
+            const movieDetails = await getMovieDetailsFromTmdb(tmdbMovie.tmdb_id);
+            
+            if (!movieDetails) {
+                return res.status(404).json({ 
+                    error: 'Movie found in TMDB but no IMDb ID available',
+                    searchedTitle: title,
+                    tmdbInfo: tmdbMovie
+                });
+            }
+
+            console.log(`Found movie via TMDB fallback: ${movieDetails.title} (${movieDetails.imdb_id})`);
 
             // Check cache first
-            const cacheKey = `imdb-${movie.tconst}`;
+            const cacheKey = `imdb-${movieDetails.imdb_id}`;
             const cached = cache.get(cacheKey);
             
             if (cached) {
-                console.log('Returning cached result');
+                console.log('Returning cached result for TMDB fallback');
                 res.set('Cache-Control', 'public, max-age=172800'); // 48 hours
                 return res.json({
-                    [movie.tconst]: cached,
+                    [movieDetails.imdb_id]: cached,
                     movieInfo: {
-                        tconst: movie.tconst,
-                        title: movie.title
+                        tconst: movieDetails.imdb_id,
+                        title: movieDetails.title,
+                        tmdb_id: tmdbMovie.tmdb_id,
+                        source: 'tmdb_fallback'
                     }
                 });
             }
 
             // Fetch quality info from Torrentio API
-            const qualityInfo = await fetchQualityInfoFromTorrentio(movie.tconst);
+            const qualityInfo = await fetchQualityInfoFromTorrentio(movieDetails.imdb_id);
             
             if (qualityInfo.error) {
                 return res.status(500).json({ 
                     error: qualityInfo.error,
                     movieInfo: {
-                        tconst: movie.tconst,
-                        title: movie.title
+                        tconst: movieDetails.imdb_id,
+                        title: movieDetails.title,
+                        tmdb_id: tmdbMovie.tmdb_id,
+                        source: 'tmdb_fallback'
                     }
                 });
             }
@@ -209,16 +522,15 @@ export const qualityController = {
             // Cache the result
             cache.set(cacheKey, qualityInfo);
 
-            const stats = cache.getStats();
-            console.log('Cache stats:', stats);
-
             // Add cache headers
             res.set('Cache-Control', 'public, max-age=172800'); // 48 hours in seconds
             res.json({
-                [movie.tconst]: qualityInfo,
+                [movieDetails.imdb_id]: qualityInfo,
                 movieInfo: {
-                    tconst: movie.tconst,
-                    title: movie.title
+                    tconst: movieDetails.imdb_id,
+                    title: movieDetails.title,
+                    tmdb_id: tmdbMovie.tmdb_id,
+                    source: 'tmdb_fallback'
                 }
             });
             

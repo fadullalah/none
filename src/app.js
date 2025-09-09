@@ -5,6 +5,8 @@ import puppeteer from 'puppeteer-extra';
 import { browserOptions, createStealthPage } from './utils/browser.js';
 import videoRoutes from './routes/video.routes.js';
 import movieRoutes from './routes/movie.routes.js';
+import schedulerRoutes from './routes/scheduler.routes.js';
+import DatabaseScheduler from './scripts/database-scheduler.js';
 
 // Load environment variables
 dotenv.config();
@@ -40,6 +42,7 @@ app.use(cors({
 // Route prefix
 app.use('/api', videoRoutes);
 app.use('/api/movies', movieRoutes);
+app.use('/api/scheduler', schedulerRoutes);
 
 // Health check endpoint
 app.get('/health', async (req, res) => {
@@ -90,9 +93,13 @@ app.use((err, req, res, next) => {
   });
 });
 
+// Initialize database scheduler
+const databaseScheduler = new DatabaseScheduler();
+
 // Start server
 app.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);
+  console.log('📊 Database scheduler initialized');
 });
 
 // Handle uncaught exceptions

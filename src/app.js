@@ -4,6 +4,7 @@ import dotenv from 'dotenv';
 import puppeteer from 'puppeteer-extra';
 import { browserOptions, createStealthPage } from './utils/browser.js';
 import videoRoutes from './routes/video.routes.js';
+import movieRoutes from './routes/movie.routes.js';
 
 // Load environment variables
 dotenv.config();
@@ -38,6 +39,7 @@ app.use(cors({
 
 // Route prefix
 app.use('/api', videoRoutes);
+app.use('/api/movies', movieRoutes);
 
 // Health check endpoint
 app.get('/health', async (req, res) => {

@@ -2,160 +2,79 @@ import NodeCache from 'node-cache';
 import _ from 'lodash';
 import fetch from 'node-fetch';
 import { withProxy } from '../utils/proxy-integration.js';
+import sqlite3 from 'sqlite3';
+import path from 'path';
 
 // Initialize cache with 48 hour TTL
 const cache = new NodeCache({ stdTTL: 48 * 60 * 60 });
 
-const TMDB_API_KEY = 'd3383b7991d02ed3b3842be70307705b';
+// Database connection
+let db = null;
+const dbPath = path.join(process.cwd(), 'imdb_movies.db');
 
-// Define workers
-const WORKERS = [
-    'https://q-s.nunflix-info.workers.dev',
-    'https://q1.xaxipe5682.workers.dev',
-    'https://q-s2.sofefor785.workers.dev',
-    'https://q-s3.hivili6726.workers.dev',
-    'https://q-s4.skilled-raccoon-kcso.workers.dev',
-    'https://q-s5.meaningful-catshark-gqpm.workers.dev',
-    'https://q-s6.wee-skink-xikl.workers.dev',
-    'https://q-s8.stuck-giraffe-ltth.workers.dev',
-    'https://q-s9.semantic-possum-zrru.workers.dev',
-    'https://q-s10.accessible-sole-vjmz.workers.dev',
-    'https://q-s11.vicarious-chickadee-apnp.workers.dev',
-    'https://q-s12.cuddly-vulture-veje.workers.dev',
-    'https://q-s13.disappointed-ladybug-bdlb.workers.dev',
-    'https://q-s14.javap81774.workers.dev',
-    'https://q-s15.causal-dragon-upft.workers.dev',
-    'https://a.confused-sloth-iiat.workers.dev',
-    'https://b.moral-lobster-xxhs.workers.dev',
-    'https://c.frozen-cattle-xvmi.workers.dev',
-    'https://d.homely-vulture-lopr.workers.dev'
-];
+// Initialize database connection
+function initDatabase() {
+    if (!db) {
+        db = new sqlite3.Database(dbPath);
+    }
+}
 
-const workerHealth = new Map(WORKERS.map(worker => [worker, { 
-    isHealthy: true,
-    failCount: 0,
-    lastCheck: Date.now() 
-}]));
+// Torrentio API base URL
+const TORRENTIO_BASE_URL = 'https://torrentio.strem.fun/stream/movie';
 
-let currentWorkerIndex = 0;
+// Search for movie by title in SQLite database
+async function findMovieByTitle(title) {
+    initDatabase();
+    
+    return new Promise((resolve, reject) => {
+        const sql = `
+            SELECT tconst, title
+            FROM movies 
+            WHERE title LIKE ?
+            ORDER BY 
+                CASE 
+                    WHEN title = ? THEN 1
+                    WHEN title LIKE ? THEN 2
+                    ELSE 3
+                END,
+                title ASC
+            LIMIT 1
+        `;
+        
+        const exactMatch = title;
+        const startsWith = `${title}%`;
+        const contains = `%${title}%`;
+        
+        db.get(sql, [contains, exactMatch, startsWith], (err, row) => {
+            if (err) {
+                reject(err);
+            } else {
+                resolve(row);
+            }
+        });
+    });
+}
 
-// Convert TMDB ID to IMDB ID
-async function convertTmdbToImdb(tmdbId) {
-    const cacheKey = `tmdb-convert-${tmdbId}`;
+// Fetch quality info directly from Torrentio API
+async function fetchQualityInfoFromTorrentio(imdbId) {
+    const cacheKey = `torrentio-${imdbId}`;
     const cached = cache.get(cacheKey);
     if (cached) return cached;
 
     try {
-        const response = await withProxy(config => 
-            fetch(
-                `https://api.themoviedb.org/3/movie/${tmdbId}?api_key=${TMDB_API_KEY}&append_to_response=external_ids`,
-                config
-            )
-        );
+        const url = `${TORRENTIO_BASE_URL}/${imdbId}.json`;
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
 
-        if (!response.ok) {
-            throw new Error(`TMDB API error: ${response.status}`);
-        }
-
-        const data = await response.json();
-        const imdbId = data.external_ids?.imdb_id;
-
-        if (!imdbId) {
-            throw new Error('No IMDB ID found');
-        }
-
-        // Cache the conversion
-        cache.set(cacheKey, imdbId);
-        return imdbId;
-    } catch (error) {
-        console.error(`TMDB conversion error for ID ${tmdbId}:`, error);
-        throw error;
-    }
-}
-
-function getNextHealthyWorker() {
-    const startIndex = currentWorkerIndex;
-    const now = Date.now();
-
-    do {
-        const worker = WORKERS[currentWorkerIndex];
-        const health = workerHealth.get(worker);
-        
-        if (!health.isHealthy && now - health.lastCheck > 5 * 60 * 1000) {
-            health.isHealthy = true;
-            health.failCount = 0;
-        }
-
-        if (health.isHealthy) {
-            currentWorkerIndex = (currentWorkerIndex + 1) % WORKERS.length;
-            return worker;
-        }
-
-        currentWorkerIndex = (currentWorkerIndex + 1) % WORKERS.length;
-    } while (currentWorkerIndex !== startIndex);
-
-    WORKERS.forEach(worker => {
-        const health = workerHealth.get(worker);
-        health.isHealthy = true;
-        health.failCount = 0;
-        health.lastCheck = now;
-    });
-
-    return WORKERS[0];
-}
-
-async function fetchFromWorker(worker, imdbIds) {
-    const params = new URLSearchParams();
-    params.set('imdb_ids', imdbIds.join(','));
-    
-    try {
-        console.log(`Fetching from worker ${worker} with IDs:`, imdbIds);
-        const response = await fetch(`${worker}/?${params}`, {
+        console.log(`Fetching quality info from Torrentio for IMDB ID: ${imdbId}`);
+        const response = await fetch(url, { 
+            signal: controller.signal,
+            redirect: 'follow',
             headers: {
-                'Accept': 'application/json'
+                'Accept': 'application/json',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
             }
         });
-
-        if (!response.ok) {
-            throw new Error(`Worker responded with ${response.status}`);
-        }
-        
-        const data = await response.json();
-        
-        const health = workerHealth.get(worker);
-        health.isHealthy = true;
-        health.failCount = 0;
-        health.lastCheck = Date.now();
-        
-        return data;
-    } catch (error) {
-        console.error(`Worker ${worker} failed:`, error);
-        
-        const health = workerHealth.get(worker);
-        health.failCount += 1;
-        health.lastCheck = Date.now();
-        
-        if (health.failCount >= 3) {
-            health.isHealthy = false;
-        }
-        
-        return null;
-    }
-}
-
-// Direct implementation of quality detection logic as fallback
-async function fetchQualityInfoDirect(imdbId) {
-    try {
-        const url = `https://torrentio.strem.fun/stream/movie/${imdbId}.json`;
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 5000); // 5 second timeout
-
-        const response = await withProxy(config => 
-            fetch(url, { 
-                ...config,
-                signal: controller.signal 
-            })
-        );
         clearTimeout(timeoutId);
 
         if (!response.ok) {
@@ -163,12 +82,14 @@ async function fetchQualityInfoDirect(imdbId) {
         }
 
         const data = await response.json();
-        if (!data.streams) {
+        
+        if (!data.streams || data.streams.length === 0) {
             return { qualities: [], mostCommon: null, bestQuality: null, allQualities: [] };
         }
 
         const qualityCounts = {};
         const allQualities = [];
+        
         data.streams.forEach(stream => {
             const quality = extractQualityType(stream.name);
             qualityCounts[quality] = (qualityCounts[quality] || 0) + 1;
@@ -179,7 +100,12 @@ async function fetchQualityInfoDirect(imdbId) {
         const mostCommon = qualities[0];
         const bestQuality = determineBestQuality(qualities);
 
-        return { qualities, mostCommon, bestQuality, allQualities };
+        const result = { qualities, mostCommon, bestQuality, allQualities };
+        
+        // Cache the result
+        cache.set(cacheKey, result);
+        return result;
+        
     } catch (error) {
         if (error.name === 'AbortError') {
             console.error(`Torrentio API request timed out for IMDB ID ${imdbId}`);
@@ -189,6 +115,7 @@ async function fetchQualityInfoDirect(imdbId) {
         return { error: error.message };
     }
 }
+
 
 function extractQualityType(qualityString) {
     const upperCaseString = qualityString.toUpperCase();
@@ -228,139 +155,73 @@ function determineBestQuality(qualities) {
     return qualities[0] || null;
 }
 
-// Check if worker response indicates a limit error
-function isLimitError(data) {
-    if (!data) return false;
-    
-    // Check if any of the entries have a limit error
-    return Object.values(data).some(item => 
-        item && item.error && (
-            item.error.includes('limit exceeded') || 
-            item.error.includes('KV get() limit') ||
-            item.error.includes('rate limit')
-        )
-    );
-}
 
 export const qualityController = {
     async getQualityInfo(req, res) {
-        const { imdb_ids, tmdb_ids } = req.query;
+        const { title } = req.query;
         
-        if (!imdb_ids && !tmdb_ids) {
-            return res.status(400).json({ error: 'Missing IDs' });
+        if (!title) {
+            return res.status(400).json({ error: 'Title parameter is required' });
         }
 
         try {
-            const results = {};
-            let allImdbIds = [];
+            // Search for movie in SQLite database
+            const movie = await findMovieByTitle(title);
             
-            // Process IMDB IDs
-            if (imdb_ids) {
-                allImdbIds.push(...imdb_ids.split(','));
-            }
-            
-            // Convert TMDB IDs to IMDB IDs
-            if (tmdb_ids) {
-                const ids = tmdb_ids.split(',');
-                for (const tmdbId of ids) {
-                    try {
-                        const imdbId = await convertTmdbToImdb(tmdbId);
-                        allImdbIds.push(imdbId);
-                        // Store the mapping for later
-                        results[tmdbId] = { pending: imdbId };
-                    } catch (error) {
-                        console.error(`Failed to convert TMDB ID ${tmdbId}:`, error);
-                        results[tmdbId] = { error: 'TMDB conversion failed' };
-                    }
-                }
+            if (!movie) {
+                return res.status(404).json({ 
+                    error: 'Movie not found in database',
+                    searchedTitle: title
+                });
             }
 
-            // Remove duplicates
-            allImdbIds = [...new Set(allImdbIds)];
-            
-            // Check cache for all IMDB IDs
-            const uncachedIds = [];
-            allImdbIds.forEach(id => {
-                const cached = cache.get(`imdb-${id}`);
-                if (cached) {
-                    results[id] = cached;
-                } else {
-                    uncachedIds.push(id);
-                }
-            });
-            
-            // Fetch uncached IDs
-            if (uncachedIds.length > 0) {
-                const worker = getNextHealthyWorker();
-                console.log(`Using worker ${worker} for IDs:`, uncachedIds);
-                
-                const workerResults = await fetchFromWorker(worker, uncachedIds);
-                
-                // Check if we hit a limit error
-                if (workerResults && isLimitError(workerResults)) {
-                    console.log('Worker limit exceeded, falling back to direct implementation');
-                    
-                    // Use direct implementation for each ID
-                    for (const id of uncachedIds) {
-                        console.log(`Fetching directly for ID: ${id}`);
-                        const directResult = await fetchQualityInfoDirect(id);
-                        if (!directResult.error) {
-                            results[id] = directResult;
-                            cache.set(`imdb-${id}`, directResult);
-                        } else {
-                            results[id] = { error: directResult.error };
-                        }
-                    }
-                } else if (workerResults) {
-                    // Process normal worker results
-                    Object.entries(workerResults).forEach(([id, data]) => {
-                        if (!data.error) {
-                            results[id] = data;
-                            cache.set(`imdb-${id}`, data);
-                        } else {
-                            results[id] = data;
-                        }
-                    });
-                } else {
-                    // Worker completely failed, use direct implementation
-                    console.log('Worker failed, falling back to direct implementation');
-                    for (const id of uncachedIds) {
-                        console.log(`Fetching directly for ID: ${id}`);
-                        const directResult = await fetchQualityInfoDirect(id);
-                        if (!directResult.error) {
-                            results[id] = directResult;
-                            cache.set(`imdb-${id}`, directResult);
-                        } else {
-                            results[id] = { error: directResult.error };
-                        }
-                    }
-                }
-            }
+            console.log(`Found movie: ${movie.title} (${movie.tconst})`);
 
-            // Map back TMDB results
-            if (tmdb_ids) {
-                const tmdbResults = {};
-                tmdb_ids.split(',').forEach(tmdbId => {
-                    const mapping = results[tmdbId];
-                    if (mapping?.pending) {
-                        tmdbResults[tmdbId] = results[mapping.pending];
-                    } else {
-                        tmdbResults[tmdbId] = mapping;
+            // Check cache first
+            const cacheKey = `imdb-${movie.tconst}`;
+            const cached = cache.get(cacheKey);
+            
+            if (cached) {
+                console.log('Returning cached result');
+                res.set('Cache-Control', 'public, max-age=172800'); // 48 hours
+                return res.json({
+                    [movie.tconst]: cached,
+                    movieInfo: {
+                        tconst: movie.tconst,
+                        title: movie.title
                     }
                 });
-                
-                // Replace results with TMDB mapping if only TMDB IDs were requested
-                if (!imdb_ids) {
-                    Object.assign(results, tmdbResults);
-                }
             }
+
+            // Fetch quality info from Torrentio API
+            const qualityInfo = await fetchQualityInfoFromTorrentio(movie.tconst);
+            
+            if (qualityInfo.error) {
+                return res.status(500).json({ 
+                    error: qualityInfo.error,
+                    movieInfo: {
+                        tconst: movie.tconst,
+                        title: movie.title
+                    }
+                });
+            }
+
+            // Cache the result
+            cache.set(cacheKey, qualityInfo);
 
             const stats = cache.getStats();
             console.log('Cache stats:', stats);
 
             // Add cache headers
             res.set('Cache-Control', 'public, max-age=172800'); // 48 hours in seconds
-            res.json(results);
+            res.json({
+                [movie.tconst]: qualityInfo,
+                movieInfo: {
+                    tconst: movie.tconst,
+                    title: movie.title
+                }
+            });
+            
         } catch (error) {
             console.error('Error in quality controller:', error);
             res.status(500).json({ error: error.message });

@@ -4,7 +4,8 @@
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "node src/app.js"
+    "start": "node src/app.js",
+    "setup-imdb": "node run-imdb-setup.js"
   },
   "keywords": [],
   "author": "",
@@ -37,6 +38,7 @@
     "puppeteer-extra-plugin-stealth": "^2.11.2",
     "redis": "^4.7.0",
     "socks-proxy-agent": "^8.0.5",
+    "sqlite3": "^5.1.7",
     "uuid": "^11.0.5"
   },
   "type": "module"

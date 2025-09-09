@@ -13,3 +13,4 @@ router.post('/regenerate', schedulerController.triggerRegeneration);
 router.get('/next-run', schedulerController.getNextRun);
 
 export default router;
+

@@ -142,3 +142,4 @@ curl https://your-api.railway.app/api/scheduler/status
 - Database regeneration typically takes 5-15 minutes depending on network speed
 - The system automatically creates the database on first startup if it doesn't exist
 - All operations are logged for debugging and monitoring
+
